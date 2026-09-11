@@ -58,7 +58,7 @@ npm install
 npm run test
 npm run typecheck
 npm run build
-paseo plugin install /Users/liyijun/codex_default/paseo-workspace-cleaner
+paseo plugin install /absolute/path/to/paseo-workspace-cleaner
 paseo plugin ls
 ```
 
