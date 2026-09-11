@@ -1,0 +1,4 @@
+{
+  "id": "paseo-workspace-cleaner",
+  "requirements": { "paseo": "^0.8.0" }
+}
