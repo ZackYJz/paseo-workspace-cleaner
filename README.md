@@ -4,7 +4,7 @@ Paseo 插件，批量清理已归档的 Workspace 和 Agent：从 History 硬删
 
 ![Workspace Cleaner 清理页，会话标题已打码](docs/screenshots/cleanup-page.png)
 
-清理页按 Project 分组，每个 Workspace 展开后列出 Agent 与状态，行内按钮删除单个 Agent，顶部统一停机清理卡片集中处理所有已归档 Workspace。截图里的会话标题做了打码。
+清理页按 Project 分组，每个 Workspace 展开后列出 Agent 与状态，行内按钮删除单个 Agent。顶部的统一停机清理卡片集中处理所有已归档 Workspace。截图里的会话标题做了打码。
 
 ## 能做什么
 
@@ -19,7 +19,9 @@ Paseo 插件，批量清理已归档的 Workspace 和 Agent：从 History 硬删
 
 ## 兼容性
 
-插件加载要求 Paseo >= 0.8.0，截至 2026-09 在 0.9.1 上实测正常。停机删除另有一道更严的闸门：只在 0.8.x 放开，唯一来源是 `shared/maintenance.ts` 的 `SUPPORTED_PASEO_MINOR`，版本闸门、维护进程连接声明与设置页诊断都从它读取。0.9.x 上在线清理和单 Agent 删除正常工作，停机删除在设置页诊断中说明未放开的原因，重新验证后再抬高这个常量。
+插件加载要求 Paseo >= 0.8.0，截至 2026-09 在 0.9.1 上实测正常。
+
+停机删除另有一道更严的闸门，只在 0.8.x 放开。唯一来源是 `shared/maintenance.ts` 的 `SUPPORTED_PASEO_MINOR`，版本闸门、维护进程连接声明与设置页诊断都从它读取。0.9.x 上在线清理和单 Agent 删除正常工作，停机删除则在设置页诊断中说明未放开的原因；重新验证后再抬高这个常量。
 
 ## 停机删除怎么跑
 
@@ -31,11 +33,18 @@ Paseo 没有公开的 Workspace 永久删除协议，插件也不能改写 Histo
 4. 停机状态下重新检查剩余 Agent 对 Pi session 的引用，然后同步清理目标 session。保留项目目录、Git worktree、其他 provider 的原生 session。
 5. 在 `finally` 中按原 home、监听地址和 Desktop 管理方式尝试启动，核对 server ID、连接及注册表。启动失败保留任务锁，状态为「需要人工恢复」，不显示成功。
 
-执行前提是整个 daemon 没有运行中、初始化中、活动轮次或待授权 Agent，没有启用的定时任务 / heartbeat 或尚未结束的定时运行。归档清单由后台独立解析，前端仅提交预览指纹，归档清单或关联 Agent 变化就拒绝旧确认，不静默扩大范围。清理任务互斥。
+执行前提是整个 daemon 没有运行中、初始化中、活动轮次或待授权的 Agent，也没有启用的定时任务 / heartbeat 或尚未结束的定时运行。归档清单由后台独立解析，前端仅提交预览指纹；归档清单或关联 Agent 一旦变化就拒绝旧确认，不静默扩大范围。清理任务互斥。
 
 Paseo 没有对其他客户端公开的维护锁，「空闲检查到停止」之间无法保证完全无竞态。确认后不要从其他客户端发消息、启动 Agent、启用定时任务，也不要手动启动另一个 daemon。宿主系统关机或维护进程被强制终止时，无法保证自动恢复。
 
-恢复异常先查看任务目录内 `result.json` 和 `request.json`，确认实际删除项与 daemon 状态。先恢复 daemon，再人工核实无维护进程运行后处理 `maintenance.lock`，不要仅删除锁然后重试。`workspaces.stopped.json` 是注册表恢复参考，恢复也必须在 daemon 停止后进行，避免覆盖新记录。不会自动重试删除或自动覆盖备份。
+恢复异常时按下面的顺序处理：
+
+1. 查看任务目录内的 `result.json` 和 `request.json`，确认实际删除项与 daemon 状态。
+2. 先恢复 daemon。
+3. 人工核实无维护进程运行后，再处理 `maintenance.lock`。不要仅删除锁然后重试。
+4. 以 `workspaces.stopped.json` 作为注册表恢复参考。恢复必须在 daemon 停止后进行，避免覆盖新记录。
+
+不会自动重试删除，也不会自动覆盖备份。
 
 ## 安装
 
