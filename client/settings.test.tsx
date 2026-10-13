@@ -3,11 +3,12 @@ import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 
+const DEFAULTS = vi.hoisted(() => ({ deletePiSessionsByDefault: true, expandProjectsByDefault: true, autoCleanupArchived: false, autoCleanupGraceDays: 7 }));
 const mocks = vi.hoisted(() => ({
   diagnostics: vi.fn(),
   settings: {
     status: "ready" as string,
-    values: { deletePiSessionsByDefault: true, expandProjectsByDefault: true },
+    values: { ...DEFAULTS },
     revision: "r1", saving: false, saveError: null as string | null,
     save: vi.fn(async () => true), reset: vi.fn(async () => true), reload: vi.fn(async () => {}),
   },
@@ -25,6 +26,7 @@ vi.mock("@getpaseo/plugin/client/ui", async () => {
     SettingsCard: stub("SettingsCard"),
     SettingsRow: stub("SettingsRow"),
     SettingsSwitch: stub("SettingsSwitch"),
+    SettingsSelect: stub("SettingsSelect"),
     SettingsAction: stub("SettingsAction"),
   };
 });
@@ -40,15 +42,15 @@ let renderer: ReactTestRenderer;
 const visible = () => JSON.stringify(renderer.toJSON());
 const all = (type: string) => renderer.root.findAllByType(type as never);
 const diagnostics = (over: Record<string, unknown> = {}) => ({
-  cliPath: "/usr/local/bin/paseo", cliFromEnvironment: false, supportedMinor: "0.8",
-  daemonVersion: "0.8.0", gateIssues: [], job: null, ...over,
+  cliPath: "/usr/local/bin/paseo", cliFromEnvironment: false,
+  due: { workspaceCount: 2, agentCount: 5 }, lastAutoRun: null, ...over,
 });
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks();
   Object.assign(mocks.settings, {
-    status: "ready", values: { deletePiSessionsByDefault: true, expandProjectsByDefault: true },
+    status: "ready", values: { ...DEFAULTS },
     revision: "r1", saving: false, saveError: null,
   });
   mocks.diagnostics.mockResolvedValue(diagnostics());
@@ -61,37 +63,51 @@ async function mount() {
 test("开关展示已保存值，并带当前 revision 回写完整文档", async () => {
   await mount();
   const switches = all("SettingsSwitch");
-  expect(switches).toHaveLength(2);
+  expect(switches).toHaveLength(3);
   expect(switches[0].props.value).toBe(true);
   await act(async () => switches[0].props.onValueChange(false));
-  expect(mocks.settings.save).toHaveBeenCalledWith(
-    { deletePiSessionsByDefault: false, expandProjectsByDefault: true }, "r1",
-  );
+  expect(mocks.settings.save).toHaveBeenCalledWith({ ...DEFAULTS, deletePiSessionsByDefault: false }, "r1");
 });
 
-test("闸门未通过时列出全部原因，而不是静默显示可用", async () => {
+test("自动清理默认关闭；打开开关与改宽限期都写回完整文档", async () => {
+  await mount();
+  const autoSwitch = all("SettingsSwitch")[2];
+  expect(autoSwitch.props.value).toBe(false);
+  await act(async () => autoSwitch.props.onValueChange(true));
+  expect(mocks.settings.save).toHaveBeenCalledWith({ ...DEFAULTS, autoCleanupArchived: true }, "r1");
+  const grace = all("SettingsSelect")[0];
+  expect(grace.props.value).toBe("7");
+  expect(grace.props.options.map((o: { value: string }) => o.value)).toEqual(["1", "3", "7", "14", "30"]);
+  await act(async () => grace.props.onValueChange("14"));
+  expect(mocks.settings.save).toHaveBeenCalledWith({ ...DEFAULTS, autoCleanupGraceDays: 14 }, "r1");
+});
+
+test("状态区显示到期范围与上次自动清理结果，失败原因可见", async () => {
   mocks.diagnostics.mockResolvedValue(diagnostics({
-    daemonVersion: "0.9.0",
-    gateIssues: ["Paseo 0.9.0 未经停机删除验证，仅支持 0.8.x", "仅支持由 Paseo Desktop 管理的 daemon"],
+    lastAutoRun: { at: "2026-10-13T01:00:00Z", workspaceCount: 0, deletedAgentCount: 0, removedPiSessionCount: 0, warnings: [], error: "注册表读取失败" },
   }));
   await mount();
-  expect(visible()).toContain("未经停机删除验证");
-  expect(visible()).toContain("Desktop 管理的 daemon");
+  expect(visible()).toContain("2 个已归档 Workspace · 5 个 Agent");
+  expect(visible()).toContain("注册表读取失败");
 });
 
-test("诊断读取失败时显示错误，不呈现为空状态", async () => {
+test("还没运行过时如实说明，不显示成清理了 0 个", async () => {
+  await mount();
+  expect(visible()).toContain("插件本次启动后还没有运行过");
+});
+
+test("宽限期变化后重新读取到期范围", async () => {
+  await mount();
+  const calls = mocks.diagnostics.mock.calls.length;
+  mocks.settings.values = { ...DEFAULTS, autoCleanupGraceDays: 30 };
+  await act(async () => renderer.update(<CleanerSettings {...props} />));
+  expect(mocks.diagnostics.mock.calls.length).toBe(calls + 1);
+});
+
+test("状态读取失败时显示错误，不呈现为空状态", async () => {
   mocks.diagnostics.mockRejectedValue(new Error("daemon 不可达"));
   await mount();
   expect(visible()).toContain("daemon 不可达");
-});
-
-test("上次停机任务的结果与阶段在设置页可见", async () => {
-  mocks.diagnostics.mockResolvedValue(diagnostics({
-    job: { id: "job-1", phase: "needs-recovery", detail: "daemon 未恢复", updatedAt: "2026-09-10T01:00:00Z", backupDirectory: "/backup/job-1", deletedAgentIds: ["a"], deletedWorkspaceIds: [], warnings: [] },
-  }));
-  await mount();
-  expect(visible()).toContain("需要人工恢复");
-  expect(visible()).toContain("/backup/job-1");
 });
 
 test("存储值无效时不把默认值当作已保存值，并提供重置入口", async () => {

@@ -44,3 +44,18 @@ export const cleanupWorkspaceRpc = defineRpc({
     warnings: z.array(z.string()),
   }),
 });
+
+// 多选批量删除：一次确认，逐个走官方删除。找不到的 ID 进 warnings，不让整批失败。
+export const cleanupAgentsRpc = defineRpc({
+  name: "workspace-cleaner.agents.cleanup",
+  input: z.object({
+    agentIds: z.array(z.string().min(1)).min(1).max(500),
+    deletePiSessions: z.boolean(),
+    confirmation: z.literal("DELETE"),
+  }),
+  output: z.object({
+    deletedAgentIds: z.array(z.string()),
+    piSessions: z.array(piSessionResult),
+    warnings: z.array(z.string()),
+  }),
+});

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { cleanupAgent, deletePaseoAgent, selectCleanupTargets, validatePiSessionFile } from "./cleanup";
+import { cleanupAgent, cleanupAgents, deletePaseoAgent, selectCleanupTargets, validatePiSessionFile } from "./cleanup";
 import { isFinishedAgent } from "../shared/cleanup";
 
 const cli = vi.hoisted(() => ({ run: vi.fn() }));
@@ -112,5 +112,22 @@ test("cleanupAgent hard-deletes Paseo state before removing the Pi session", asy
     else process.env.PASEO_HOME = previousHome;
     if (previousCliPath === undefined) delete process.env.PASEO_CLI_PATH;
     else process.env.PASEO_CLI_PATH = previousCliPath;
+  }
+});
+
+test("cleanupAgents deletes every listed Agent once and reports IDs that no longer exist", async () => {
+  const listed = ["batch-1", "batch-2"].map(id => ({ id, provider: "codex", cwd: "/tmp/x", workspaceId: "w", persistence: null }));
+  const removed = new Set<string>();
+  cli.run.mockImplementation((_file: string, args: string[]) => { removed.add(args[2]!); });
+  const paseo = { agents: { list: async () => ({ entries: listed.filter(a => !removed.has(a.id)).map(agent => ({ agent })), pageInfo: { nextCursor: null } }) } } as unknown as PluginHandlerContext["paseo"];
+  const previousHome = process.env.PASEO_HOME;
+  process.env.PASEO_HOME = await mkdtemp(path.join(tmpdir(), "paseo-batch-"));
+  try {
+    const result = await cleanupAgents({ agentIds: ["batch-1", "batch-2", "gone"], deletePiSessions: false, confirmation: "DELETE" }, { paseo });
+    expect(result.deletedAgentIds).toEqual(["batch-1", "batch-2"]);
+    expect(result.piSessions.map(s => s.status)).toEqual(["skipped", "skipped"]);
+    expect(result.warnings).toEqual(["gone: 找不到这个 Agent，可能已被删除"]);
+  } finally {
+    if (previousHome === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = previousHome;
   }
 });

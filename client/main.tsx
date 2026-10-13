@@ -1,336 +1,274 @@
-import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
-import { Icon } from "@getpaseo/plugin/client/react-native";
+import { type PluginScreenProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
+import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  ActivityIndicator,
-  Pressable,
-  ScrollView,
-  Text,
-  View,
-  useWindowDimensions,
-} from "react-native";
-import { activityLabel, activityTime, workspaceActivity, type ActivityRecord } from "../shared/activity";
-import { catalogRpc, jobPhaseLabel, previewRpc, startMaintenanceRpc, terminalJob, type MaintenanceJob, type WorkspaceRecord, type ProjectRecord } from "../shared/maintenance";
+import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { activityTime, relativeLabel, workspaceActivity } from "../shared/activity";
+import { catalogRpc, type ProjectRecord, type WorkspaceRecord } from "../shared/catalog";
+import { cleanupAgentsRpc, isFinishedAgent } from "../shared/cleanup";
 import { onCleanupRequested, takePendingCleanup, type CleanupIntent } from "./cleanup-intent";
 import { ConfirmCleanup, useAgentCleanup, useWorkspaceCleanup } from "./cleanup-dialog";
-import { ActionButton, agentStatusText, listAllAgents, useCleanupStyles, type CleanupTheme, type ListedAgent } from "./cleanup-ui";
+import { ActionButton, agentStatusText, listAllAgents, type CleanupTheme, type ListedAgent } from "./cleanup-ui";
 import { useCleanupDefaults } from "./defaults";
 
-function AgentCleanupAction({
-  agentId,
-  label,
-  theme,
-  onDone,
-  buttonLabel = "删除",
-  danger = false,
-  hideButton = false,
-  autoOpen = false,
-  onDismiss,
-}: {
-  agentId: string;
-  label: string;
-  theme: CleanupTheme;
-  onDone?: () => void;
-  buttonLabel?: string;
-  danger?: boolean;
-  hideButton?: boolean;
-  autoOpen?: boolean;
-  onDismiss?: () => void;
-}) {
-  const styles = useCleanupStyles(theme);
-  const { deletePiSessionsByDefault } = useCleanupDefaults();
-  const [open, setOpen] = useState(false);
-  const [deletePiSession, setDeletePiSession] = useState(deletePiSessionsByDefault);
-  const { busy, error, setError, run } = useAgentCleanup();
+type Colors = CleanupTheme["colors"];
+type Filter = "cleanable" | "all";
 
-  function openDialog() {
-    setError(null);
-    setDeletePiSession(deletePiSessionsByDefault);
-    setOpen(true);
-  }
-  function closeDialog() {
-    setOpen(false);
-    onDismiss?.();
-  }
-  // 深链意图：组件因意图而挂载时直接弹出确认窗口。
-  useEffect(() => {
-    if (autoOpen) openDialog();
-  }, [autoOpen]);
+// 只给 6 位 hex 叠透明度；主题色不是这种格式时退回中性底色，不猜。
+function tint(color: string, alpha: string, fallback: string): string {
+  return /^#[0-9a-f]{6}$/i.test(color) ? `${color}${alpha}` : fallback;
+}
 
-  async function confirm() {
-    const ok = await run({ agentId, deletePiSession });
-    if (ok) {
-      closeDialog();
-      onDone?.();
-    }
-  }
+function useStyles(colors: Colors, compact: boolean) {
+  return useMemo(() => ({
+    root: { flex: 1, minWidth: 0, backgroundColor: colors.surface0 },
+    scroll: { flex: 1, minWidth: 0 },
+    content: { width: "100%" as const, maxWidth: 880, alignSelf: "center" as const, paddingHorizontal: compact ? 12 : 24, paddingTop: compact ? 12 : 20, gap: 16 },
+    headerRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 12, minWidth: 0 },
+    title: { color: colors.foreground, fontSize: 20, lineHeight: 28, fontWeight: "600" as const },
+    stats: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
+    toolbar: { flexDirection: compact ? "column" as const : "row" as const, alignItems: compact ? "stretch" as const : "center" as const, gap: 8, minWidth: 0 },
+    segment: { flexDirection: "row" as const, padding: 2, borderRadius: 8, backgroundColor: colors.surface1, borderWidth: 1, borderColor: colors.border, alignSelf: compact ? "stretch" as const : "auto" as const },
+    segmentItem: { flex: compact ? 1 : undefined, flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "center" as const, gap: 6, height: 28, paddingHorizontal: 12, borderRadius: 6 },
+    segmentText: { color: colors.foregroundMuted, fontSize: 13, fontWeight: "500" as const },
+    segmentCount: { color: colors.foregroundMuted, fontSize: 12, fontVariant: ["tabular-nums" as const] },
+    search: { flex: compact ? undefined : 1, minWidth: 0, flexDirection: "row" as const, alignItems: "center" as const, gap: 8, height: 34, paddingHorizontal: 10, borderRadius: 8, backgroundColor: colors.surface1, borderWidth: 1, borderColor: colors.border },
+    searchInput: { flex: 1, minWidth: 0, color: colors.foreground, fontSize: 14, paddingVertical: 0, outlineStyle: "none" as never },
+    list: { gap: 20 },
+    projectHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, paddingVertical: 4, minWidth: 0 },
+    projectName: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 16, fontWeight: "600" as const, letterSpacing: 0.4 },
+    projectCount: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 16, opacity: 0.7 },
+    // 每个 Project 一个连续列表；Workspace 是列表里的分组行，不再各自成卡。
+    group: { borderRadius: 10, borderWidth: 1, borderColor: colors.border, overflow: "hidden" as const },
+    workspaceRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 10, minHeight: 44, paddingHorizontal: 12, paddingVertical: 7, backgroundColor: colors.surface1, minWidth: 0 },
+    workspaceDivider: { borderTopWidth: 1, borderTopColor: colors.border },
+    workspaceName: { color: colors.foreground, fontSize: 14, lineHeight: 20, fontWeight: "600" as const, flexShrink: 1 },
+    workspaceMeta: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 16 },
+    badge: { color: colors.foregroundMuted, fontSize: 11, lineHeight: 16, paddingHorizontal: 6, borderRadius: 4, borderWidth: 1, borderColor: colors.border, overflow: "hidden" as const },
+    agentRow: { flexDirection: compact ? "column" as const : "row" as const, alignItems: compact ? "stretch" as const : "center" as const, gap: compact ? 2 : 10, minHeight: compact ? 52 : 38, paddingHorizontal: 12, paddingVertical: compact ? 8 : 6, borderTopWidth: 1, borderTopColor: colors.border, minWidth: 0 },
+    agentMain: { flexDirection: "row" as const, alignItems: "center" as const, gap: 10, flex: compact ? undefined : 1, minWidth: 0 },
+    agentTitle: { color: colors.foreground, fontSize: 14, lineHeight: 20, flex: 1, minWidth: 0 },
+    agentMeta: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 16, flexShrink: 0, paddingLeft: compact ? 44 : 0, fontVariant: ["tabular-nums" as const] },
+    empty: { alignItems: "center" as const, gap: 10, paddingVertical: 48 },
+    emptyText: { color: colors.foregroundMuted, fontSize: 14, lineHeight: 20, textAlign: "center" as const },
+    error: { color: colors.statusDanger, fontSize: 13, lineHeight: 20 },
+    bar: { position: "absolute" as const, left: 0, right: 0, bottom: 0, alignItems: "center" as const, paddingHorizontal: compact ? 12 : 24, paddingBottom: compact ? 12 : 16, pointerEvents: "box-none" as const },
+    barInner: { width: "100%" as const, maxWidth: 832, flexDirection: "row" as const, alignItems: "center" as const, gap: 8, paddingLeft: 14, paddingRight: 8, paddingVertical: 8, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+    barText: { color: colors.foreground, fontSize: 13, fontWeight: "500" as const, flex: 1, minWidth: 0 },
+    scopeList: { gap: 4, maxHeight: 220 },
+    scopeItem: { color: colors.foreground, fontSize: 13, lineHeight: 20 },
+    scopeMeta: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
+    warning: { color: colors.statusWarning, fontSize: 12, lineHeight: 18 },
+  }), [colors, compact]);
+}
+type Styles = ReturnType<typeof useStyles>;
 
+function StatusDot({ agent, colors }: { agent: ListedAgent; colors: Colors }) {
+  // 填充 = 还活着（运行中绿、空闲灰），空心 = 已结束（已关闭、已归档）。
+  const live = !isFinishedAgent(agent);
+  const color = agent.status === "running" ? colors.statusSuccess : agent.status === "error" ? colors.statusDanger : colors.foregroundMuted;
+  return <View style={{ width: 8, height: 8, borderRadius: 4, borderWidth: 1.5, borderColor: color, backgroundColor: live ? color : "transparent", opacity: agent.archivedAt ? 0.6 : 1 }} />;
+}
+
+function Checkbox({ state, colors, label, onPress }: { state: "on" | "off" | "mixed"; colors: Colors; label: string; onPress: () => void }) {
   return (
-    <>
-      {hideButton ? null : <ActionButton label={buttonLabel} icon="Trash2" danger={danger} theme={theme} onPress={openDialog} />}
-      <ConfirmCleanup
-        open={open}
-        title="删除 Agent"
-        identity={`${label}\n${agentId}`}
-        detail="永久删除此 Agent 的 Paseo 记录与时间线，无法撤销。不删除项目文件。"
-        error={error}
-        deletePiSessions={deletePiSession}
-        busy={busy}
-        theme={theme}
-        onDeletePiSessionsChange={setDeletePiSession}
-        onOpenChange={(value) => { setOpen(value); if (!value) onDismiss?.(); }}
-        confirmLabel="确认删除"
-        onConfirm={() => { void confirm(); }}
-      >
-        <Text style={styles.muted}>删除 Paseo 记录与时间线，不删除项目文件。</Text>
-      </ConfirmCleanup>
-    </>
+    <Pressable accessibilityRole="checkbox" accessibilityLabel={label} accessibilityState={{ checked: state === "mixed" ? "mixed" : state === "on" }}
+      hitSlop={8} onPress={onPress} style={({ pressed }) => ({ transform: [{ scale: pressed ? 0.88 : 1 }] })}>
+      <Icon name={state === "on" ? "SquareCheck" : state === "mixed" ? "SquareMinus" : "Square"} size={16} color={state === "off" ? colors.foregroundMuted : colors.accent} />
+    </Pressable>
   );
 }
 
-function WorkspaceCleanupAction({
-  workspaceId,
-  label,
-  theme,
-  onDone,
-  buttonLabel = "清理全部",
-  danger = false,
-  hideButton = false,
-  autoOpen = false,
-  onDismiss,
-}: {
-  workspaceId: string;
-  label: string;
-  theme: CleanupTheme;
-  onDone?: () => void;
-  buttonLabel?: string;
-  danger?: boolean;
-  hideButton?: boolean;
-  autoOpen?: boolean;
-  onDismiss?: () => void;
-}) {
-  const styles = useCleanupStyles(theme);
-  const { deletePiSessionsByDefault } = useCleanupDefaults();
-  const [open, setOpen] = useState(false);
-  const [deletePiSessions, setDeletePiSessions] = useState(deletePiSessionsByDefault);
-  const { busy, error, setError, run } = useWorkspaceCleanup();
-
-  function openDialog() {
-    setError(null);
-    setDeletePiSessions(deletePiSessionsByDefault);
-    setOpen(true);
-  }
-  function closeDialog() {
-    setOpen(false);
-    onDismiss?.();
-  }
-  useEffect(() => {
-    if (autoOpen) openDialog();
-  }, [autoOpen]);
-
-  async function confirm() {
-    const ok = await run({ workspaceId, deletePiSessions });
-    if (ok) {
-      closeDialog();
-      onDone?.();
-    }
-  }
-
+function Segment({ value, onChange, counts, styles, colors }: { value: Filter; onChange: (v: Filter) => void; counts: Record<Filter, number>; styles: Styles; colors: Colors }) {
+  const items: Array<[Filter, string]> = [["cleanable", "可清理"], ["all", "全部"]];
   return (
-    <>
-      {hideButton ? null : <ActionButton label={buttonLabel} icon={danger ? "Trash2" : undefined} danger={danger} theme={theme} onPress={openDialog} />}
-      <ConfirmCleanup
-        open={open}
-        title="清理 Workspace"
-        identity={`${label}\n${workspaceId}`}
-        detail="归档 Workspace，并永久删除其中全部 Agent 与时间线，包括未归档的 Agent。保留项目文件和 Workspace 归档记录。"
-        error={error}
-        deletePiSessions={deletePiSessions}
-        busy={busy}
-        theme={theme}
-        onDeletePiSessionsChange={setDeletePiSessions}
-        onOpenChange={(value) => { setOpen(value); if (!value) onDismiss?.(); }}
-        confirmLabel="确认删除"
-        onConfirm={() => { void confirm(); }}
-      >
-        <Text style={styles.muted}>归档记录可在 Cleaner 中使用停机删除移除。</Text>
-      </ConfirmCleanup>
-    </>
+    <View style={styles.segment} accessibilityRole="tablist">
+      {items.map(([key, label]) => {
+        const active = key === value;
+        return (
+          <Pressable key={key} accessibilityRole="tab" accessibilityState={{ selected: active }} accessibilityLabel={`${label} ${counts[key]}`}
+            onPress={() => onChange(key)}
+            style={({ pressed }) => [styles.segmentItem, active && { backgroundColor: colors.surface0 }, pressed && !active && { opacity: 0.7 }]}>
+            <Text style={[styles.segmentText, active && { color: colors.foreground }]}>{label}</Text>
+            <Text style={[styles.segmentCount, active && { color: colors.foreground }]}>{counts[key]}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
   );
 }
 
-function JobSummary({ job, theme }: { job: MaintenanceJob; theme: CleanupTheme }) {
-  const styles = useCleanupStyles(theme);
-  const [expanded, setExpanded] = useState(false);
-  const problem = job.phase === "failed" || job.phase === "needs-recovery";
-  const status = jobPhaseLabel(job);
-  return <View style={[styles.section, { gap: 4 }]}>
-    <View style={styles.spread}>
-      <Text style={[styles.grow, problem ? styles.danger : styles.muted]}>
-        {status} · {job.deletedWorkspaceIds.length} 个 Workspace / {job.deletedAgentIds.length} 个 Agent{job.warnings.length ? ` · ${job.warnings.length} 条提醒` : ""}
-      </Text>
-      <Pressable accessibilityRole="button" accessibilityLabel={expanded ? "收起清理详情" : "查看清理详情"}
-        accessibilityState={{ expanded }} onPress={() => setExpanded(value => !value)} style={styles.button}>
-        <Text style={styles.buttonText}>{expanded ? "收起" : "详情"}</Text>
-      </Pressable>
-    </View>
-    {problem || !terminalJob(job) || expanded ? <Text selectable style={problem ? styles.danger : styles.subtitle}>{job.detail}</Text> : null}
-    {expanded ? <View style={{ gap: 4 }}>
-      <Text style={styles.muted}>更新于 {job.updatedAt}</Text>
-      <Text selectable style={styles.muted}>备份与结果：{job.backupDirectory}</Text>
-      {job.warnings.map((warning, i) => <Text key={i} style={styles.muted}>{warning}</Text>)}
-    </View> : null}
-  </View>;
-}
-
-function OfflineCleanupCard({ workspaces, agents, job, loading, loadError, theme, onDone }: {
-  workspaces: WorkspaceRecord[]; agents: ListedAgent[]; job: MaintenanceJob | null;
-  loading: boolean; loadError: string | null; theme: CleanupTheme; onDone: () => void;
-}) {
-  const preview = useRpc(previewRpc);
-  const start = useRpc(startMaintenanceRpc);
-  const styles = useCleanupStyles(theme);
-  const [open, setOpen] = useState(false);
-  const [plan, setPlan] = useState<Awaited<ReturnType<typeof preview>> | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const archived = workspaces.filter(w => w.archivedAt);
-  const targetAgents = agents.filter(a => archived.some(w => w.workspaceId === a.workspaceId));
-  const maintenancePending = job && (!terminalJob(job) || job.phase === "needs-recovery");
-  async function show() {
-    setOpen(true); setError(null); setPlan(null);
-    try { setPlan(await preview({})); }
-    catch (error) { setError(error instanceof Error ? error.message : String(error)); }
-  }
-  async function confirm() {
-    if (!plan || plan.blockers.length) return;
-    setBusy(true); setError(null);
-    try {
-      await start({ token: plan.token, confirmation: "DELETE" });
-      setOpen(false); onDone();
-    } catch (error) {
-      setError(`${error instanceof Error ? error.message : String(error)}。若连接已断开，重连后先查看顶部任务结果，不要重复提交。`);
-      onDone();
-    } finally { setBusy(false); }
-  }
-  return <View style={[styles.inset, { padding: theme.compact ? 16 : 20, gap: 12, borderWidth: 1, borderColor: theme.colors.border }]}>
-    <View style={[styles.spread, theme.compact ? { flexDirection: "column", alignItems: "stretch" } : {}]}>
-    <View style={[styles.grow, { gap: 4 }]}>
-      <Text style={styles.heading}>统一停机清理</Text>
-      <Text style={styles.subtitle}>删除已归档 Workspace、其下 Agent 与 Pi session。保留项目文件；daemon 短暂断开后自动恢复。</Text>
-      <Text style={styles.muted}>{loading ? "正在读取归档范围…" : loadError ? "读取失败，请刷新后重试" : archived.length ? `${archived.length} 个已归档 Workspace · ${targetAgents.length} 个 Agent` : "没有已归档的 Workspace，无需停机。"}</Text>
-    </View>
-    <ActionButton label="预览停机清理" theme={theme} disabled={busy || loading || Boolean(loadError) || !archived.length || Boolean(maintenancePending)} onPress={() => void show()} />
-    </View>
-    {job ? <JobSummary key={job.id} job={job} theme={theme} /> : null}
-    <ConfirmCleanup open={open} title="统一停机删除" identity={plan ? `${plan.workspaceIds.length} 个 Workspace · ${plan.agentIds.length} 个 Agent · ${plan.piSessionCount} 个关联 Pi session` : "正在检查删除范围…"}
-      detail={`清理以下所有已归档 Workspace，包括其中${plan ? ` ${plan.unarchivedAgentCount} 个` : ""}未单独归档的 Agent。时间线永久删除，备份仅含注册表和元数据。所有客户端会暂时断开，请勿同时发送任务。`}
-      error={error ?? (plan?.blockers.length ? plan.blockers.join("\n") : null)}
-      theme={theme} busy={busy} confirmDisabled={!plan || plan.blockers.length > 0} confirmLabel="确认删除"
-      deletePiSessions includePiSessions onDeletePiSessionsChange={() => {}} onOpenChange={setOpen} onConfirm={confirm}>
-      {plan ? <View style={{ gap: 12 }}>
-        {plan.workspaces.map(workspace => <View key={workspace.workspaceId} style={{ gap: 2 }}>
-          <Text style={styles.heading}>{workspace.projectName} / {workspace.name}</Text>
-          <Text style={styles.muted}>{workspace.agentCount} 个 Agent</Text>
-          <Text selectable style={styles.muted}>{workspace.workspaceId}</Text>
-          <Text selectable style={styles.muted}>{workspace.cwd}</Text>
-        </View>)}
-      </View> : !error ? <ActivityIndicator color={theme.colors.accent} /> : null}
-    </ConfirmCleanup>
-  </View>;
-}
-
-function WorkspaceGroup({ agents, workspace, workspaceId, projectRoot, theme, onDone }: {
-  agents: ListedAgent[];
-  workspace?: WorkspaceRecord;
-  workspaceId?: string;
-  projectRoot?: string;
-  theme: CleanupTheme;
-  onDone: () => void;
-}) {
-  const first = agents[0];
-  const styles = useCleanupStyles(theme);
-  // An unavailable (often archived) workspace must not borrow an agent's title as its name.
-  const label = workspace?.title || workspace?.displayName || (workspaceId ? "Workspace" : "未关联 Workspace");
+function AgentRow({ agent, selected, onToggle, styles, colors, compact }: { agent: ListedAgent; selected: boolean; onToggle: () => void; styles: Styles; colors: Colors; compact: boolean }) {
+  const meta = `${agent.provider} · ${agentStatusText(agent)} · ${relativeLabel(activityTime(agent))}`;
   return (
-    <View style={styles.section} accessibilityLabel={`Workspace ${workspaceId ?? first?.id}`}>
-      <View style={styles.sectionHeader}>
-        <View style={styles.spread}>
-          <View style={styles.grow}>
-            <Text style={styles.workspaceHeading}>{label}</Text>
-            <View style={styles.meta}>
-              <Text style={styles.muted}>{agents.length} 个 Agent</Text>
-              {workspace?.archivedAt ? <Text style={styles.muted}>已归档</Text> : null}
-              <Text style={styles.muted}>{activityLabel(workspaceActivity(workspace, agents))}</Text>
-            </View>
-          </View>
-          {!workspace?.archivedAt && workspaceId ? <WorkspaceCleanupAction workspaceId={workspaceId} label={label} theme={theme} onDone={onDone} /> : null}
-        </View>
-        {(workspace?.cwd ?? first?.cwd) !== projectRoot ? <Text selectable style={styles.muted}>{workspace?.cwd ?? first?.cwd}</Text> : null}
-        {!workspace ? <Text selectable style={styles.muted}>{workspaceId ?? first?.id}</Text> : null}
+    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`${agent.title ?? "未命名 Agent"}，${meta}`}
+      onPress={onToggle}
+      style={({ pressed, hovered }: { pressed: boolean; hovered?: boolean }) => [styles.agentRow,
+        selected ? { backgroundColor: tint(colors.accent, "1f", colors.surface2) } : (pressed || hovered) ? { backgroundColor: colors.surface1 } : null]}>
+      <View style={styles.agentMain}>
+        <Checkbox state={selected ? "on" : "off"} colors={colors} label={`选择 ${agent.title ?? agent.id}`} onPress={onToggle} />
+        <StatusDot agent={agent} colors={colors} />
+        <Text style={[styles.agentTitle, agent.archivedAt ? { color: colors.foregroundMuted } : null]} numberOfLines={compact ? 2 : 1}>{agent.title ?? "未命名 Agent"}</Text>
       </View>
-      {[...agents].sort((a, b) => activityTime(b) - activityTime(a) || a.id.localeCompare(b.id)).map((agent) => (
-        <View key={agent.id} style={[styles.spread, styles.agentRow]}>
-          <View style={[styles.grow, { gap: 2 }]}>
-            <Text style={styles.text}>{agent.title ?? "未命名 Agent"}</Text>
-            <View style={styles.meta}>
-              <Text style={styles.muted}>{agent.provider}</Text>
-              <Text style={styles.muted}>{agentStatusText(agent)}</Text>
-              <Text selectable style={styles.muted}>{agent.id.slice(0, 8)}</Text>
-            </View>
+      <Text style={styles.agentMeta}>{meta}</Text>
+    </Pressable>
+  );
+}
+
+function WorkspaceGroup({ first, workspace, workspaceId, projectRoot, agents, selected, onToggle, onToggleAll, onDone, styles, colors, theme }: {
+  first: boolean; workspace?: WorkspaceRecord; workspaceId?: string; projectRoot?: string; agents: ListedAgent[];
+  selected: ReadonlySet<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], on: boolean) => void; onDone: () => void;
+  styles: Styles; colors: Colors; theme: CleanupTheme;
+}) {
+  const ids = agents.map(a => a.id);
+  const picked = ids.filter(id => selected.has(id)).length;
+  const state = picked === 0 ? "off" : picked === ids.length ? "on" : "mixed";
+  const name = workspace?.title || workspace?.displayName || (workspaceId ? "Workspace" : "未关联 Workspace");
+  const cwd = workspace?.cwd ?? agents[0]?.cwd;
+  // 只在不是 Project 根目录时给出位置，取最后一段（通常是 worktree 名），完整路径放无障碍标签里。
+  const place = cwd && cwd !== projectRoot ? cwd.split("/").filter(Boolean).pop() : undefined;
+  const sorted = [...agents].sort((a, b) => activityTime(b) - activityTime(a) || a.id.localeCompare(b.id));
+  return (
+    <View style={first ? null : styles.workspaceDivider}>
+      <View style={styles.workspaceRow} accessibilityLabel={`Workspace ${name}${cwd ? `，${cwd}` : ""}`}>
+        <Checkbox state={state} colors={colors} label={`选择 ${name} 下全部 Agent`} onPress={() => onToggleAll(ids, state !== "on")} />
+        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minWidth: 0 }}>
+            <Text style={styles.workspaceName} numberOfLines={1}>{name}</Text>
+            {workspace?.archivedAt ? <Text style={styles.badge}>已归档</Text> : null}
           </View>
-          <AgentCleanupAction agentId={agent.id} label={agent.title ?? agent.id} theme={theme} onDone={onDone} />
+          <Text style={styles.workspaceMeta} numberOfLines={1}>
+            {[`${agents.length} 个 Agent`, relativeLabel(workspaceActivity(workspace, agents)), place].filter(Boolean).join(" · ")}
+          </Text>
         </View>
+        {workspaceId && !workspace?.archivedAt ? <WorkspaceCleanupAction workspaceId={workspaceId} label={name} theme={theme} onDone={onDone} trigger="icon" /> : null}
+      </View>
+      {sorted.map(agent => (
+        <AgentRow key={agent.id} agent={agent} selected={selected.has(agent.id)} onToggle={() => onToggle(agent.id)} styles={styles} colors={colors} compact={theme.compact} />
       ))}
     </View>
   );
 }
 
-function ProjectGroup({ project, workspaces, agents, theme, onDone }: {
-  project?: ProjectRecord; workspaces: WorkspaceRecord[]; agents: ListedAgent[]; theme: CleanupTheme; onDone: () => void;
+function ProjectSection({ label, workspaceIds, agents, collapsed, onCollapse, children, styles, colors }: {
+  label: string; workspaceIds: string[]; agents: ListedAgent[]; collapsed: boolean; onCollapse: () => void;
+  children: React.ReactNode; styles: Styles; colors: Colors;
 }) {
-  const { expandProjectsByDefault } = useCleanupDefaults();
-  const [expanded, setExpanded] = useState(expandProjectsByDefault);
-  const [focused, setFocused] = useState(false);
-  const styles = useCleanupStyles(theme);
-  useEffect(() => setExpanded(expandProjectsByDefault), [expandProjectsByDefault]);
-  const label = project?.customName || project?.displayName || "未关联 Project";
-  const ids = [...new Set([...workspaces.map(w => w.workspaceId), ...agents.map(a => a.workspaceId ?? `agent:${a.id}`)])];
-  const activity = (id: string) => workspaceActivity(workspaces.find(w => w.workspaceId === id), agents.filter(a => (a.workspaceId ?? `agent:${a.id}`) === id));
-  ids.sort((a, b) => activity(b) - activity(a) || a.localeCompare(b));
-  return <View style={{ gap: 4 }}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`${expanded ? "折叠" : "展开"} ${label}`}
-      accessibilityState={{ expanded }} onPress={() => setExpanded(value => !value)}
-      onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
-      style={({ pressed }) => [styles.spread, { minHeight: 52, padding: 10, borderRadius: 6, backgroundColor: pressed ? theme.colors.surface2 : theme.colors.surface1, borderWidth: 1, borderColor: focused ? theme.colors.accent : "transparent" }]}>
-      <Icon name={expanded ? "ChevronDown" : "ChevronRight"} size={16} color={theme.colors.foregroundMuted} />
-      <View style={styles.grow}>
-        <Text style={styles.projectHeading}>{label}</Text>
-        <Text style={styles.muted}>{ids.length} 个 Workspace · {agents.length} 个 Agent</Text>
-      </View>
-    </Pressable>
-    {expanded ? <View style={{ gap: 20, paddingLeft: theme.compact ? 8 : 26 }}>
-      {project ? <Text selectable style={styles.muted}>{project.rootPath}</Text> : null}
-      {ids.map(id => <WorkspaceGroup key={id} workspaceId={id.startsWith("agent:") ? undefined : id}
-        workspace={workspaces.find(w => w.workspaceId === id)} projectRoot={project?.rootPath} agents={agents.filter(a => (a.workspaceId ?? `agent:${a.id}`) === id)} theme={theme} onDone={onDone} />)}
-    </View> : null}
-  </View>;
+  return (
+    <View style={{ gap: 8 }}>
+      <Pressable accessibilityRole="button" accessibilityLabel={`${collapsed ? "展开" : "折叠"} ${label}`} accessibilityState={{ expanded: !collapsed }}
+        onPress={onCollapse} style={({ pressed }) => [styles.projectHead, pressed && { opacity: 0.6 }]}>
+        <Icon name={collapsed ? "ChevronRight" : "ChevronDown"} size={14} color={colors.foregroundMuted} />
+        <Text style={styles.projectName} numberOfLines={1}>{label}</Text>
+        <Text style={styles.projectCount} numberOfLines={1}>{`${workspaceIds.length} 个 Workspace · ${agents.length} 个 Agent`}</Text>
+      </Pressable>
+      {collapsed ? null : <View style={styles.group}>{children}</View>}
+    </View>
+  );
 }
 
-export function MainSurface({ theme, layout }: PluginSurfaceProps) {
+function AgentCleanupAction({ agentId, label, theme, onDone }: { agentId: string; label: string; theme: CleanupTheme; onDone: () => void }) {
+  const { deletePiSessionsByDefault } = useCleanupDefaults();
+  const [deletePiSession, setDeletePiSession] = useState(deletePiSessionsByDefault);
+  const { busy, error, run } = useAgentCleanup();
+  return (
+    <ConfirmCleanup open title="删除 Agent" identity={`${label}\n${agentId}`}
+      detail="永久删除此 Agent 的 Paseo 记录与时间线，无法撤销。不删除项目文件。"
+      error={error} deletePiSessions={deletePiSession} busy={busy} theme={theme}
+      onDeletePiSessionsChange={setDeletePiSession} onOpenChange={value => { if (!value) onDone(); }}
+      confirmLabel="确认删除" onConfirm={() => { void run({ agentId, deletePiSession }).then(ok => { if (ok) onDone(); }); }} />
+  );
+}
+
+function WorkspaceCleanupAction({ workspaceId, label, theme, onDone, trigger, autoOpen = false, onDismiss }: {
+  workspaceId: string; label: string; theme: CleanupTheme; onDone?: () => void; trigger?: "icon"; autoOpen?: boolean; onDismiss?: () => void;
+}) {
+  const { deletePiSessionsByDefault } = useCleanupDefaults();
+  const [open, setOpen] = useState(autoOpen);
+  const [deletePiSessions, setDeletePiSessions] = useState(deletePiSessionsByDefault);
+  const { busy, error, setError, run } = useWorkspaceCleanup();
+  function close() { setOpen(false); onDismiss?.(); }
+  return (
+    <>
+      {trigger === "icon" ? (
+        // 低频且有确认窗口的操作，退成弱化图标，不在每一行喊一遍。
+        <Pressable accessibilityRole="button" accessibilityLabel={`归档并清理 ${label}`} hitSlop={6}
+          onPress={() => { setError(null); setDeletePiSessions(deletePiSessionsByDefault); setOpen(true); }}
+          style={({ pressed, hovered }: { pressed: boolean; hovered?: boolean }) => ({ width: 28, height: 28, borderRadius: 6, alignItems: "center", justifyContent: "center",
+            backgroundColor: hovered || pressed ? theme.colors.surface2 : "transparent", transform: [{ scale: pressed ? 0.9 : 1 }] })}>
+          <Icon name="Archive" size={15} color={theme.colors.foregroundMuted} />
+        </Pressable>
+      ) : null}
+      <ConfirmCleanup open={open} title="归档并清理 Workspace" identity={`${label}\n${workspaceId}`}
+        detail="归档 Workspace，并永久删除其中全部 Agent 与时间线，包括未归档的 Agent。保留项目文件。"
+        error={error} deletePiSessions={deletePiSessions} busy={busy} theme={theme}
+        onDeletePiSessionsChange={setDeletePiSessions} onOpenChange={value => { if (!value) close(); else setOpen(true); }}
+        confirmLabel="确认删除" onConfirm={() => { void run({ workspaceId, deletePiSessions }).then(ok => { if (ok) { close(); onDone?.(); } }); }} />
+    </>
+  );
+}
+
+function BatchConfirm({ agents, open, onOpenChange, onDone, theme, styles }: {
+  agents: ListedAgent[]; open: boolean; onOpenChange: (v: boolean) => void; onDone: () => void; theme: CleanupTheme; styles: Styles;
+}) {
+  const cleanup = useRpc(cleanupAgentsRpc);
+  const toast = useToast();
+  const { deletePiSessionsByDefault } = useCleanupDefaults();
+  const [deletePiSessions, setDeletePiSessions] = useState(deletePiSessionsByDefault);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { if (open) { setError(null); setDeletePiSessions(deletePiSessionsByDefault); } }, [open, deletePiSessionsByDefault]);
+  const live = agents.filter(a => !isFinishedAgent(a)).length;
+  async function confirm() {
+    setBusy(true); setError(null);
+    try {
+      const result = await cleanup({ agentIds: agents.map(a => a.id), deletePiSessions, confirmation: "DELETE" });
+      const removed = result.piSessions.filter(s => s.status === "trashed" || s.status === "quarantined").length;
+      toast.show(`已删除 ${result.deletedAgentIds.length} 个 Agent${removed ? `，移除 ${removed} 个 Pi session` : ""}。`, { variant: "success" });
+      for (const warning of result.warnings) toast.show(warning, { variant: "warning" });
+      onOpenChange(false); onDone();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(false); }
+  }
+  const shown = agents.slice(0, 8);
+  return (
+    <ConfirmCleanup open={open} onOpenChange={onOpenChange} title={`删除 ${agents.length} 个 Agent`} identity={`${agents.length} 个 Agent 与全部时间线`}
+      detail="永久删除，无法撤销。不删除项目文件，也不归档 Workspace。" error={error} busy={busy} theme={theme}
+      deletePiSessions={deletePiSessions} onDeletePiSessionsChange={setDeletePiSessions} confirmLabel={`删除 ${agents.length} 个`} onConfirm={() => void confirm()}>
+      <ScrollView style={styles.scopeList}>
+        {shown.map(agent => (
+          <Text key={agent.id} style={styles.scopeItem} numberOfLines={1}>
+            {agent.title ?? "未命名 Agent"}<Text style={styles.scopeMeta}>  {agentStatusText(agent)} · {agent.id.slice(0, 8)}</Text>
+          </Text>
+        ))}
+        {agents.length > shown.length ? <Text style={styles.scopeMeta}>{`另外 ${agents.length - shown.length} 个`}</Text> : null}
+      </ScrollView>
+      {live ? <Text style={styles.warning}>{`其中 ${live} 个还没结束，删除时会先中断它们。`}</Text> : null}
+    </ConfirmCleanup>
+  );
+}
+
+export function MainSurface({ theme, layout }: PluginScreenProps) {
   const paseo = usePaseo();
   const getCatalog = useRpc(catalogRpc);
-  const cleanupTheme = { colors: theme.colors, compact: layout.compact };
-  const styles = useCleanupStyles(cleanupTheme);
+  const { expandProjectsByDefault } = useCleanupDefaults();
+  const cleanupTheme: CleanupTheme = { colors: theme.colors, compact: layout.compact };
+  const colors = theme.colors;
+  const styles = useStyles(colors, layout.compact);
   const [agents, setAgents] = useState<ListedAgent[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
-  const [job, setJob] = useState<MaintenanceJob | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [intent, setIntent] = useState<CleanupIntent | null>(null);
+  const [filter, setFilter] = useState<Filter | null>(null);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [confirming, setConfirming] = useState(false);
 
-  // 深链意图：挂载时取走待处理意图，挂载期间订阅新意图（主页已开着时 ⌘K 也能弹）。
+  // 深链意图：挂载时取走待处理意图，挂载期间订阅新意图（页面已开着时 ⌘K 也能弹）。
   useEffect(() => {
     const pending = takePendingCleanup();
     if (pending) setIntent(pending);
@@ -344,80 +282,136 @@ export function MainSurface({ theme, layout }: PluginSurfaceProps) {
       const [nextAgents, nextCatalog] = await Promise.all([listAllAgents(paseo), getCatalog({})]);
       const merged = new Map(nextAgents.map(a => [a.id, a]));
       for (const agent of nextCatalog.archivedAgents ?? []) if (!merged.has(agent.id)) merged.set(agent.id, agent);
-      setAgents([...merged.values()]);
-      setWorkspaces(nextCatalog.workspaces);
+      const all = [...merged.values()];
+      setAgents(all);
+      // 已归档且没有 Agent 的 Workspace 在 Paseo 里已经看不到，这里也不再列出。
+      setWorkspaces(nextCatalog.workspaces.filter(w => !w.archivedAt || all.some(a => a.workspaceId === w.workspaceId)));
       setProjects(nextCatalog.projects);
-      setJob(nextCatalog.job);
+      setSelected(prev => new Set([...prev].filter(id => merged.has(id))));
+      setLoaded(true);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
     } finally {
       setLoading(false);
     }
   }, [paseo, getCatalog]);
-
   useEffect(() => void refresh(), [refresh]);
-  useEffect(() => {
-    if (!job || terminalJob(job)) return;
-    const timer = setInterval(() => void refresh(), 5000);
-    return () => clearInterval(timer);
-  }, [job, refresh]);
+
+  const cleanableCount = useMemo(() => agents.filter(a => isFinishedAgent(a)).length, [agents]);
+  // 首次加载后定默认筛选：有可清理的就只看它们，否则看全部。
+  const activeFilter: Filter = filter ?? (loaded && cleanableCount === 0 ? "all" : "cleanable");
+
+  const projectOf = useCallback((agent: ListedAgent) => workspaces.find(w => w.workspaceId === agent.workspaceId)?.projectId ?? "unknown", [workspaces]);
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return agents.filter(agent => {
+      if (activeFilter === "cleanable" && !isFinishedAgent(agent)) return false;
+      if (!needle) return true;
+      const workspace = workspaces.find(w => w.workspaceId === agent.workspaceId);
+      const project = projects.find(p => p.projectId === workspace?.projectId);
+      return [agent.title, agent.id, workspace?.title, workspace?.displayName, project?.customName, project?.displayName]
+        .some(value => value?.toLowerCase().includes(needle));
+    });
+  }, [agents, workspaces, projects, activeFilter, query]);
 
   const groups = useMemo(() => {
-    const projectFor = (agent: ListedAgent) => workspaces.find(w => w.workspaceId === agent.workspaceId)?.projectId ?? "unknown";
-    const ids = [...new Set([...workspaces.map(w => w.projectId), ...agents.map(projectFor)])];
-    return ids.map(id => ({ id, project: projects.find(p => p.projectId === id), workspaces: workspaces.filter(w => w.projectId === id), agents: agents.filter(a => projectFor(a) === id) }))
-      .sort((a, b) => Math.max(0, ...b.agents.map(activityTime), ...b.workspaces.map(w => activityTime({ createdAt: w.createdAt }))) - Math.max(0, ...a.agents.map(activityTime), ...a.workspaces.map(w => activityTime({ createdAt: w.createdAt }))) || a.id.localeCompare(b.id));
-  }, [agents, workspaces, projects]);
+    const byProject = new Map<string, ListedAgent[]>();
+    for (const agent of visible) byProject.set(projectOf(agent), [...(byProject.get(projectOf(agent)) ?? []), agent]);
+    return [...byProject.entries()].map(([projectId, list]) => {
+      const workspaceIds = [...new Set(list.map(a => a.workspaceId ?? `agent:${a.id}`))];
+      const latest = (id: string) => workspaceActivity(workspaces.find(w => w.workspaceId === id), list.filter(a => (a.workspaceId ?? `agent:${a.id}`) === id));
+      workspaceIds.sort((a, b) => latest(b) - latest(a) || a.localeCompare(b));
+      return { projectId, project: projects.find(p => p.projectId === projectId), agents: list, workspaceIds, latest: Math.max(0, ...list.map(activityTime)) };
+    }).sort((a, b) => b.latest - a.latest || a.projectId.localeCompare(b.projectId));
+  }, [visible, workspaces, projects, projectOf]);
+
+  const isCollapsed = (projectId: string) => collapsed.has(projectId) !== !expandProjectsByDefault;
+  const toggle = (id: string) => setSelected(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const toggleAll = (ids: string[], on: boolean) => setSelected(prev => { const next = new Set(prev); for (const id of ids) { if (on) next.add(id); else next.delete(id); } return next; });
+  const selectedAgents = agents.filter(a => selected.has(a.id));
+  const hasSelection = selectedAgents.length > 0;
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={{ gap: 8 }}>
-        <View style={styles.spread}>
-          <View style={styles.grow}>
-            <Text style={styles.title}>会话清理</Text>
-            <Text style={styles.muted}>{loading ? "正在读取会话…" : error ? "会话读取失败" : `${groups.length} 个 Project · ${agents.length} 个 Agent`}</Text>
+    <View style={styles.root}>
+      <ScrollView style={styles.scroll} contentContainerStyle={[styles.content, { paddingBottom: hasSelection ? 96 : 32 }]} keyboardShouldPersistTaps="handled">
+        <View style={styles.headerRow}>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.title}>清理</Text>
+            <Text style={styles.stats}>
+              {loaded ? `${agents.length} 个 Agent · ${cleanableCount} 个已归档或已关闭` : error ? "读取失败" : "正在读取…"}
+            </Text>
           </View>
-          <ActionButton label={loading ? "读取中" : "刷新"} icon="RefreshCw" theme={cleanupTheme} disabled={loading} onPress={() => void refresh()} />
+          <Pressable accessibilityRole="button" accessibilityLabel="刷新" disabled={loading} hitSlop={6} onPress={() => void refresh()}
+            style={({ pressed }) => ({ width: 32, height: 32, borderRadius: 8, alignItems: "center", justifyContent: "center", opacity: loading ? 0.5 : 1, transform: [{ scale: pressed ? 0.9 : 1 }] })}>
+            {loading && loaded ? <ActivityIndicator size="small" color={colors.foregroundMuted} /> : <Icon name="RefreshCw" size={16} color={colors.foregroundMuted} />}
+          </Pressable>
         </View>
-          <Text style={styles.subtitle}>
-            按 Project 分组，Workspace 按最近活跃排序。删除 Agent 无需停机。
-          </Text>
-      </View>
-      <OfflineCleanupCard workspaces={workspaces} agents={agents} job={job} loading={loading} loadError={error} theme={cleanupTheme} onDone={() => void refresh()} />
-      {loading ? <ActivityIndicator color={theme.colors.accent} /> : null}
-      {error ? <Text accessibilityRole="alert" style={styles.danger}>{error}</Text> : null}
-      {!loading && !error && groups.length === 0 ? (
-        <Text style={styles.muted}>没有可清理的 Agent。</Text>
+
+        <View style={styles.toolbar}>
+          <Segment value={activeFilter} onChange={setFilter} counts={{ cleanable: cleanableCount, all: agents.length }} styles={styles} colors={colors} />
+          <View style={styles.search}>
+            <Icon name="Search" size={14} color={colors.foregroundMuted} />
+            <TextInput value={query} onChangeText={setQuery} placeholder="搜索标题、Workspace 或 Project" placeholderTextColor={colors.foregroundMuted}
+              accessibilityLabel="搜索" style={styles.searchInput} autoCorrect={false} autoCapitalize="none" />
+            {query ? <Pressable accessibilityRole="button" accessibilityLabel="清空搜索" hitSlop={8} onPress={() => setQuery("")}>
+              <Icon name="X" size={14} color={colors.foregroundMuted} />
+            </Pressable> : null}
+          </View>
+        </View>
+
+        {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
+        {!loaded && loading ? <ActivityIndicator color={colors.foregroundMuted} /> : null}
+
+        {loaded && groups.length === 0 ? (
+          <View style={styles.empty}>
+            <Icon name="BrushCleaning" size={20} color={colors.foregroundMuted} />
+            <Text style={styles.emptyText}>
+              {query ? `没有匹配「${query.trim()}」的 Agent` : activeFilter === "cleanable" ? "没有已归档或已关闭的 Agent，暂时不用清理" : "没有 Agent"}
+            </Text>
+            <View>
+              {query ? <ActionButton label="清空搜索" size="small" theme={cleanupTheme} onPress={() => setQuery("")} />
+                : activeFilter === "cleanable" && agents.length ? <ActionButton label={`查看全部 ${agents.length} 个`} size="small" theme={cleanupTheme} onPress={() => setFilter("all")} /> : null}
+            </View>
+          </View>
+        ) : null}
+
+        <View style={styles.list}>
+          {groups.map(group => (
+            <ProjectSection key={group.projectId} label={group.project?.customName || group.project?.displayName || "未关联 Project"}
+              workspaceIds={group.workspaceIds} agents={group.agents}
+              collapsed={isCollapsed(group.projectId)} onCollapse={() => setCollapsed(prev => { const next = new Set(prev); if (next.has(group.projectId)) next.delete(group.projectId); else next.add(group.projectId); return next; })}
+              styles={styles} colors={colors}>
+              {group.workspaceIds.map((id, index) => (
+                <WorkspaceGroup key={id} first={index === 0} workspaceId={id.startsWith("agent:") ? undefined : id} workspace={workspaces.find(w => w.workspaceId === id)}
+                  projectRoot={group.project?.rootPath} agents={group.agents.filter(a => (a.workspaceId ?? `agent:${a.id}`) === id)}
+                  selected={selected} onToggle={toggle} onToggleAll={toggleAll} onDone={() => void refresh()} styles={styles} colors={colors} theme={cleanupTheme} />
+              ))}
+            </ProjectSection>
+          ))}
+        </View>
+      </ScrollView>
+
+      {hasSelection ? (
+        <View style={styles.bar}>
+          <View style={styles.barInner} accessibilityRole="toolbar">
+            <Text style={styles.barText} numberOfLines={1}>{`已选 ${selectedAgents.length} 个 Agent`}</Text>
+            <ActionButton label="取消" size="small" theme={cleanupTheme} onPress={() => setSelected(new Set())} />
+            <ActionButton label={`删除 ${selectedAgents.length} 个`} size="small" danger theme={cleanupTheme} onPress={() => setConfirming(true)} />
+          </View>
+        </View>
       ) : null}
-      {groups.map(group => (
-        <ProjectGroup key={group.id} {...group} theme={cleanupTheme} onDone={() => void refresh()} />
-      ))}
-      {!loading && intent?.kind === "workspace" ? (
-        <WorkspaceCleanupAction
-          workspaceId={intent.id}
-          label={workspaces.find(workspace => workspace.workspaceId === intent.id)?.displayName ?? intent.id}
-          theme={cleanupTheme}
-          buttonLabel="清理全部 Agent"
-          danger
-          hideButton
-          autoOpen
-          onDismiss={() => setIntent(null)}
-          onDone={() => setIntent(null)}
-        />
+
+      <BatchConfirm agents={selectedAgents} open={confirming} onOpenChange={setConfirming} onDone={() => { setSelected(new Set()); void refresh(); }} theme={cleanupTheme} styles={styles} />
+
+      {loaded && intent?.kind === "workspace" ? (
+        <WorkspaceCleanupAction key={`w:${intent.id}`} workspaceId={intent.id} theme={cleanupTheme} autoOpen
+          label={workspaces.find(w => w.workspaceId === intent.id)?.title ?? workspaces.find(w => w.workspaceId === intent.id)?.displayName ?? intent.id}
+          onDismiss={() => setIntent(null)} onDone={() => void refresh()} />
       ) : null}
-      {!loading && intent?.kind === "agent" ? (
-        <AgentCleanupAction
-          agentId={intent.id}
-          label={agents.find(agent => agent.id === intent.id)?.title ?? intent.id}
-          theme={cleanupTheme}
-          buttonLabel="删除 Agent"
-          danger
-          hideButton
-          autoOpen
-          onDismiss={() => setIntent(null)}
-          onDone={() => setIntent(null)}
-        />
+      {loaded && intent?.kind === "agent" ? (
+        <AgentCleanupAction key={`a:${intent.id}`} agentId={intent.id} label={agents.find(a => a.id === intent.id)?.title ?? intent.id} theme={cleanupTheme}
+          onDone={() => { setIntent(null); void refresh(); }} />
       ) : null}
-    </ScrollView>
+    </View>
   );
 }

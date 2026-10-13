@@ -1,50 +1,60 @@
-# Paseo Workspace Cleaner
+# 清理（paseo-workspace-cleaner）
 
-Paseo 插件，批量清理已归档的 Workspace 和 Agent：从 History 硬删除单个 Agent，或统一停机删除所有已归档 Workspace 连同其下 Agent 与 Pi session。
+Paseo 插件，侧栏和页面里叫「清理」。在线清理已归档的 Workspace 和 Agent：永久删除 Agent 与时间线，把对应的 Pi session 移到废纸篓；可选在 Workspace 归档满宽限期后自动清理。所有操作都走 Paseo 官方命令，不停 daemon，不改写 Paseo 的存储文件。
 
 ![Workspace Cleaner 清理页，会话标题已打码](docs/screenshots/cleanup-page.png)
 
-清理页按 Project 分组，每个 Workspace 展开后列出 Agent 与状态，行内按钮删除单个 Agent。顶部的统一停机清理卡片集中处理所有已归档 Workspace。截图里的会话标题做了打码。
+截图摄于 2026-09，是改版前的页面，会话标题做了打码。
+
+## 清理页
+
+- 默认只看「可清理」的 Agent，即已归档或已关闭的；一个都没有时自动切到「全部」。顶部可以按标题、Workspace 或 Project 搜索。
+- 每个 Project 是一个可折叠的列表，Workspace 是列表里的分组行（名称、Agent 数、最近活动、worktree 名），Agent 是单行：状态点、标题、provider、状态、相对时间。状态点实心表示还活着（运行中为绿色），空心表示已结束。
+- 点 Agent 行或它的复选框即可选中；Workspace 行的复选框一次选中或取消它下面当前可见的全部 Agent，部分选中时显示半选。选中后底部出现「删除 N 个」，确认窗口列出将删除的 Agent，选中里还有没结束的会单独提醒。
+- 活跃 Workspace 行右侧的归档图标是「归档并清理」：先归档，再删除其下全部 Agent，同样要确认。
 
 ## 能做什么
 
-- 从 History 硬删除单个 Agent，可选同时移除对应 Pi session
-- 在线清理：归档 Workspace 并清理其下 Agent，不停机
-- 统一停机清理：一次删除所有已归档 Workspace、其下 Agent 和 Pi session，由独立维护进程执行，插件或 daemon 正常停止后继续跑
+- 多选批量删除 Agent，可选同时移除对应 Pi session
+- 清理活跃 Workspace：先归档，再删除其下全部 Agent
+- 自动清理：Workspace 归档满宽限期后，自动删除其下的 Agent，默认关闭
 - 同一 Pi session 仍被其他 Agent 引用时自动保留
 - Pi session 优先进系统废纸篓，废纸篓命令不可用时改名隔离，不直接永久删除
-- Settings → Plugins → Workspace Cleaner 里调整清理默认值，查看停机删除为何不可用的只读诊断
 
-清理入口都是浮层，不开新标签页：Workspace header 的垃圾桶按钮、Command Center 两项、composer 里的 `/clean`、清理页行内按钮。header 浮层另提供「仅已关闭（N）」，只删除已归档或已关闭的 Agent，不碰 idle 与 running。范围卡先列出将被删除的每个 Agent，确认弹窗是第二道闸。
+其他入口都是浮层，不开新标签页：Workspace header 的垃圾桶按钮、Command Center 两项、composer 里的 `/clean`。header 浮层另提供「仅已关闭（N）」，只删除已归档或已关闭的 Agent，不碰 idle 与 running。范围卡先列出将被删除的每个 Agent，确认弹窗是第二道闸。
+
+已归档且下面没有 Agent 的 Workspace 不在清理页列出，因为 Paseo 自己也不再显示它们，见下文。
+
+## 自动清理
+
+在 Settings → Plugins → 清理设置里打开，可选宽限期 1、3、7、14、30 天，默认 7 天。
+
+- 到期条件：Workspace 的归档时间满宽限期。其下 Agent 必须本身已归档、已关闭，且没有进行中的回合或待处理的授权，否则跳过。
+- 宽限期内仍可在 Paseo 里 Restore。删除前会重读注册表，期间被 Restore 的 Workspace 不会被动到。
+- 是否同时移除 Pi session，跟随「默认同时移除 Pi session」。
+- 在 daemon 上运行，每小时最多一轮。插件服务端只在生命周期事件和 RPC 调用里拿得到 Paseo 会话，所以插件刚加载后要等到第一个事件（新建 Agent、回合结束、归档等）或打开清理页才开始计时。刚打开开关时会立即检查一轮。
+- 和手动清理互斥。手动清理进行中时，这一轮让路，下次触发再试。
+- 设置页的「状态」显示当前已满宽限期的范围（开关关着也能先看会清掉多少），以及上次自动清理的结果。结果只保存在插件进程内存里，`paseo plugin logs paseo-workspace-cleaner` 里有每一轮的记录。
+
+## 为什么不再停机删除注册表
+
+旧版本有一个「统一停机清理」：停掉 daemon，从 `projects/workspaces.json` 里删掉已归档 Workspace 的行，再把 daemon 拉起来。2026-10 对照 Paseo 0.11.2 的源码重新评估后移除了，原因有三个：
+
+1. 收益接近于零。daemon 返回给 App 和 SDK 的所有 Workspace 列表都会先过滤掉已归档的。已归档 Workspace 只会通过它下面残留的 Agent（History）再冒出来，删掉这些 Agent 后就看不到了。剩下的只是注册表里一行几百字节的数据。
+2. 恢复步骤从 0.9 起失效。`paseo daemon start` 改为只读 `config.json`，不再接受维护进程用的 `--listen`、`--no-web-ui`；CLI 启动的 daemon 也不再由 Desktop 托管。
+3. 风险和代码量都集中在这一块：维护进程、任务锁、备份、恢复流程，以及每次 Paseo 升级都要重新验证的版本闸门。
+
+注意一个边界：以后在同一个目录（非 worktree）新建 Workspace 时，Paseo 会复用那条已归档记录并恢复它，旧标题也会跟着回来。这是 Paseo 的设计，插件不干预。
+
+如果确实要物理删除这些行，正确的做法是让 Paseo 提供 Workspace 删除接口。daemon 内部已经有 `workspaceRegistry.remove`，目前只用在导入失败的回滚里。
+
+旧版停机清理留下的任务目录与备份在 `~/.paseo/workspace-cleaner/`，插件不再读写它们，确认不需要后可以手动删除。
 
 ## 兼容性
 
-插件加载要求 Paseo >= 0.8.0，截至 2026-09 在 0.9.1 上实测正常。
+插件加载要求 Paseo >= 0.11.0（清理页用 0.11 的 `addScreen` + `addSidebarHeaderItem` 注册，manifest 用了 0.11 的 `name`），截至 2026-10 在 0.11.2 上实测正常。
 
-停机删除另有一道更严的闸门，只在 0.8.x 放开。唯一来源是 `shared/maintenance.ts` 的 `SUPPORTED_PASEO_MINOR`，版本闸门、维护进程连接声明与设置页诊断都从它读取。0.9.x 上在线清理和单 Agent 删除正常工作，停机删除则在设置页诊断中说明未放开的原因；重新验证后再抬高这个常量。
-
-## 停机删除怎么跑
-
-Paseo 没有公开的 Workspace 永久删除协议，插件也不能改写 History 页面。停机删除做成独立维护进程：
-
-1. 将 Workspace 注册表和目标 Agent 元数据备份到 `<PASEO_HOME>/workspace-cleaner/<任务 ID>/`，权限仅限当前用户。不备份时间线，官方 Agent 删除不可由这些备份完整撤销。
-2. 在线逐个调用绑定本机 daemon 的 `paseo agent delete <完整 ID> --json`，核验 ID、数量、列表及实际存储。任何失败都停止后续清理。
-3. 再检查全部 Agent 与定时任务，然后 `paseo daemon stop --home ...`，不使用 `--force`。确认原 PID 退出、无替代 daemon、端口关闭后重读并备份注册表，只移除仍保持原状且无剩余 Agent 引用的目标行，其他字段与行保留，原子替换写回。
-4. 停机状态下重新检查剩余 Agent 对 Pi session 的引用，然后同步清理目标 session。保留项目目录、Git worktree、其他 provider 的原生 session。
-5. 在 `finally` 中按原 home、监听地址和 Desktop 管理方式尝试启动，核对 server ID、连接及注册表。启动失败保留任务锁，状态为「需要人工恢复」，不显示成功。
-
-执行前提是整个 daemon 没有运行中、初始化中、活动轮次或待授权的 Agent，也没有启用的定时任务 / heartbeat 或尚未结束的定时运行。归档清单由后台独立解析，前端仅提交预览指纹；归档清单或关联 Agent 一旦变化就拒绝旧确认，不静默扩大范围。清理任务互斥。
-
-Paseo 没有对其他客户端公开的维护锁，「空闲检查到停止」之间无法保证完全无竞态。确认后不要从其他客户端发消息、启动 Agent、启用定时任务，也不要手动启动另一个 daemon。宿主系统关机或维护进程被强制终止时，无法保证自动恢复。
-
-恢复异常时按下面的顺序处理：
-
-1. 查看任务目录内的 `result.json` 和 `request.json`，确认实际删除项与 daemon 状态。
-2. 先恢复 daemon。
-3. 人工核实无维护进程运行后，再处理 `maintenance.lock`。不要仅删除锁然后重试。
-4. 以 `workspaces.stopped.json` 作为注册表恢复参考。恢复必须在 daemon 停止后进行，避免覆盖新记录。
-
-不会自动重试删除，也不会自动覆盖备份。
+截至 0.11.2，`agents.list({ includeArchived: true })` 和 `paseo agent ls -a` 仍会漏掉一部分已归档 Agent。插件读取 `~/.paseo/agents` 补齐，并逐个用 `paseo agent inspect` 确认它们确实已归档、已关闭，确认不了就拒绝继续。这是插件对 Paseo 存储唯一的直接访问，只读。
 
 ## 安装
 
@@ -52,28 +62,26 @@ Paseo 没有对其他客户端公开的维护锁，「空闲检查到停止」�
 npm install
 npm run test
 npm run typecheck
-npm run build
 paseo plugin install /absolute/path/to/paseo-workspace-cleaner
 paseo plugin ls
 ```
 
 `paseo plugin ls` 必须为 `running`，异常时看 `paseo plugin logs paseo-workspace-cleaner`。
 
-插件后端会调用同一台 daemon 上的 `paseo agent delete`。`paseo` 不在 daemon 的 `PATH` 时，用 daemon 环境变量 `PASEO_CLI_PATH` 指定绝对路径，实际生效的值与来源可在设置页诊断中确认。
+插件后端会调用同一台 daemon 上的 `paseo agent delete` 和 `paseo agent inspect`。`paseo` 不在 daemon 的 `PATH` 时，用 daemon 环境变量 `PASEO_CLI_PATH` 指定绝对路径，实际生效的值与来源可在设置页「状态」里确认。
 
 ## 开发
 
-0.8 的编译边界由目录决定：
+编译边界由目录决定：
 
 ```text
-index.client.tsx          # App 侧入口：侧边栏、Command Center、设置页、header 按钮、/clean
-index.server.ts           # daemon 子进程入口：注册 settings 与全部 RPC handler
+index.client.tsx          # App 侧入口：清理页、侧栏项、Command Center、设置页、header 按钮、/clean
+index.server.ts           # daemon 子进程入口：settings、RPC handler、自动清理的触发与定时
 client/                   # 只编译进 App bundle
-server/                   # 只编译进 daemon bundle：cleanup / maintenance / diagnostics / 维护进程
+server/cleanup.ts         # 删除 Agent、移除 Pi session、手动与自动共用的进程内互斥
+server/auto-cleanup.ts    # 到期判定（纯函数）与自动清理调度
+server/registry.ts        # Paseo 注册表与 Agent 存储的只读访问
 shared/                   # 两侧共用：Zod 契约、settings 定义、纯值与纯函数
-dist/maintenance.mjs      # esbuild 产出的独立维护进程
 ```
 
-源码改动后先测试、类型检查、构建，再 `paseo plugin reload paseo-workspace-cleaner`，无需重启 daemon。
-
-安全诊断：`node dist/maintenance.mjs --check` 只读检查当前归档范围及阻止条件，`--probe` 只验证进程能启动，不接触 daemon。设置页的「停机删除可用性」同样只读，只跑 `paseo daemon status` 并读上次任务结果。单元测试使用临时目录和注入的生命周期，不在真实用户数据上执行停机或删除。
+源码改动后先测试、类型检查，再 `paseo plugin reload paseo-workspace-cleaner`，无需重启 daemon。单元测试使用临时目录和模拟的 `paseo` 命令，不在真实用户数据上执行删除。

@@ -5,19 +5,22 @@ import {
   SettingsCard,
   SettingsRow,
   SettingsSection,
+  SettingsSelect,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
 import { Text } from "react-native";
-import { jobPhaseLabel } from "../shared/maintenance";
-import { cleanerSettings, diagnosticsRpc } from "../shared/settings";
+import { cleanerSettings, diagnosticsRpc, GRACE_DAY_OPTIONS } from "../shared/settings";
 
 type Diagnostics = RpcOutput<typeof diagnosticsRpc>;
 
-function jobSummary(job: Diagnostics["job"]): string {
-  if (!job) return "尚未执行过停机清理";
-  // 备份目录是异常恢复的入口，诊断页不隐藏它。
-  return `${jobPhaseLabel(job)} · ${job.deletedWorkspaceIds.length} 个 Workspace / ${job.deletedAgentIds.length} 个 Agent · ${job.updatedAt} · 备份 ${job.backupDirectory}`;
+const GRACE_OPTIONS = GRACE_DAY_OPTIONS.map(days => ({ label: `${days} 天`, value: String(days) }));
+
+function lastRunSummary(run: Diagnostics["lastAutoRun"]): string {
+  // 结果只保存在插件进程内存里，插件重载或 daemon 重启后清空。
+  if (!run) return "插件本次启动后还没有运行过";
+  if (run.error) return `${run.at} · 失败`;
+  return `${run.at} · ${run.workspaceCount} 个 Workspace / ${run.deletedAgentCount} 个 Agent / ${run.removedPiSessionCount} 个 Pi session`;
 }
 
 export function CleanerSettings({ theme, layout }: PluginSurfaceProps) {
@@ -38,23 +41,29 @@ export function CleanerSettings({ theme, layout }: PluginSurfaceProps) {
       setLoading(false);
     }
   }, [diagnostics]);
-  useEffect(() => { void refresh(); }, [refresh]);
 
-  const gateIssues = report?.gateIssues ?? [];
+  // 宽限期改了之后到期范围也会变，跟着重读。
+  const graceDays = settings.status === "ready" ? settings.values.autoCleanupGraceDays : null;
+  useEffect(() => { void refresh(); }, [graceDays, refresh]);
+
+  const pending = loading ? "正在检查…" : "尚未读取";
   const diagnosticsSection = (
-    <SettingsSection title="停机删除可用性" info="只读检查，不会删除或停止任何内容">
+    <SettingsSection title="状态" info="只读检查，不会删除任何内容">
       <SettingsCard>
         <SettingsRow
-          label="Paseo CLI"
-          hint={report ? `${report.cliFromEnvironment ? "来自环境变量" : "来自 PATH"}：${report.cliPath}` : loading ? "正在检查…" : "尚未读取"}
+          label="已满宽限期"
+          hint={report ? `${report.due.workspaceCount} 个已归档 Workspace · ${report.due.agentCount} 个 Agent（开关打开后的下一轮会清理）` : pending}
           error={error}
         />
         <SettingsRow
-          label="daemon 版本"
-          hint={report ? `${report.daemonVersion ?? "未知"} · 停机删除仅在 ${report.supportedMinor}.x 上验证` : loading ? "正在检查…" : "尚未读取"}
-          error={gateIssues.length ? gateIssues.join("；") : null}
+          label="上次自动清理"
+          hint={report ? lastRunSummary(report.lastAutoRun) : pending}
+          error={report?.lastAutoRun?.error ?? null}
         />
-        <SettingsRow label="上次停机任务" hint={report ? jobSummary(report.job) : loading ? "正在读取…" : "尚未读取"} />
+        <SettingsRow
+          label="Paseo CLI"
+          hint={report ? `${report.cliFromEnvironment ? "来自环境变量" : "来自 PATH"}：${report.cliPath}` : pending}
+        />
         <SettingsAction label="重新检查" actionLabel={loading ? "检查中…" : "立即检查"} disabled={loading} onPress={() => void refresh()} />
       </SettingsCard>
     </SettingsSection>
@@ -115,6 +124,29 @@ export function CleanerSettings({ theme, layout }: PluginSurfaceProps) {
             disabled={settings.saving}
             onValueChange={(value) =>
               void settings.save({ ...settings.values, expandProjectsByDefault: value }, settings.revision)
+            }
+          />
+        </SettingsCard>
+      </SettingsSection>
+      <SettingsSection title="自动清理" info="在 daemon 上运行，每小时检查一次">
+        <SettingsCard>
+          <SettingsSwitch
+            label="自动清理已归档的 Workspace"
+            hint="Workspace 归档满宽限期后，永久删除其下已归档、已关闭的 Agent 与时间线。是否同时移除 Pi session 跟随上面的默认值。保留项目文件。"
+            value={settings.values.autoCleanupArchived}
+            disabled={settings.saving}
+            onValueChange={(value) =>
+              void settings.save({ ...settings.values, autoCleanupArchived: value }, settings.revision)
+            }
+          />
+          <SettingsSelect
+            label="宽限期"
+            hint="归档后这段时间内仍可在 Paseo 里 Restore，期满才会被清理。"
+            value={String(settings.values.autoCleanupGraceDays)}
+            options={GRACE_OPTIONS}
+            disabled={settings.saving}
+            onValueChange={(value) =>
+              void settings.save({ ...settings.values, autoCleanupGraceDays: Number(value) }, settings.revision)
             }
           />
         </SettingsCard>

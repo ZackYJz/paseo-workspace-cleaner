@@ -9,7 +9,8 @@ vi.mock("node:child_process", async importOriginal => ({
     inspect.calls(args); callback(null, { stdout: JSON.stringify(inspect.output), stderr: "" });
   },
 }));
-import { supplementArchivedAgents, withCleanupLock } from "./maintenance";
+import { withCleanupLock } from "./cleanup";
+import { supplementArchivedAgents } from "./registry";
 let home: string;
 beforeEach(async () => {
   inspect.calls.mockClear();
@@ -28,9 +29,10 @@ test.each([{ Status: "running" }, { Archived: false }, { PendingPermissions: [{}
   Object.assign(inspect.output, override);
   await expect(supplementArchivedAgents([], home)).rejects.toThrow();
 });
-test("online cleanup and maintenance use a single exclusive lock", async () => {
+test("manual and automatic cleanup share one in-process lock that is released on failure", async () => {
   await withCleanupLock(async () => {
-    await expect(withCleanupLock(async () => {}, home)).rejects.toThrow("已有清理任务");
-  }, home);
-  await expect(withCleanupLock(async () => "released", home)).resolves.toBe("released");
+    await expect(withCleanupLock(async () => {})).rejects.toThrow("已有清理任务");
+  });
+  await expect(withCleanupLock(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+  await expect(withCleanupLock(async () => "released")).resolves.toBe("released");
 });

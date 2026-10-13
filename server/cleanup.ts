@@ -4,14 +4,15 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { cleanupAgentRpc, cleanupWorkspaceRpc, isFinishedAgent } from "../shared/cleanup";
+import { catalogRpc } from "../shared/catalog";
+import { cleanupAgentRpc, cleanupAgentsRpc, cleanupWorkspaceRpc, isFinishedAgent } from "../shared/cleanup";
+import { catalog, supplementArchivedAgents, type AgentSnapshot } from "./registry";
 
 const execFileAsync = promisify(execFile);
 const PAGE_SIZE = 200;
 const SESSION_HEADER_BYTES = 64 * 1024;
 
 type PaseoApi = PluginHandlerContext["paseo"];
-type AgentSnapshot = Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number]["agent"];
 type PiSessionStatus = RpcOutput<typeof cleanupAgentRpc>["piSessions"][number];
 
 export interface PiSessionCandidate {
@@ -34,7 +35,7 @@ export async function listAllAgents(paseo: PaseoApi): Promise<AgentSnapshot[]> {
     agents.push(...page.entries.map((entry) => entry.agent));
     cursor = page.pageInfo.nextCursor ?? undefined;
   } while (cursor);
-  return (await import("./maintenance")).supplementArchivedAgents(agents);
+  return supplementArchivedAgents(agents);
 }
 
 async function listAllActiveWorkspaces(paseo: PaseoApi) {
@@ -175,7 +176,18 @@ export async function removePiSession(
   }
 }
 
-async function deleteAgents(
+// 插件子进程里唯一的删除通道：手动清理与自动清理互斥，不交错执行。
+// 进程内互斥即可，不再需要文件锁，进程崩溃也不会留下卡死的锁。
+let cleanupRunning = false;
+export async function withCleanupLock<T>(action: () => Promise<T>): Promise<T> {
+  if (cleanupRunning) throw new Error("已有清理任务在执行，请等待完成后再操作");
+  cleanupRunning = true;
+  try { return await action(); }
+  finally { cleanupRunning = false; }
+}
+export const cleanupBusy = () => cleanupRunning;
+
+export async function deleteAgents(
   targets: readonly AgentSnapshot[],
   paseo: PaseoApi,
   deletePiSessions: boolean,
@@ -216,7 +228,7 @@ export async function cleanupAgent(
   input: RpcInput<typeof cleanupAgentRpc>,
   { paseo }: PluginHandlerContext,
 ): Promise<RpcOutput<typeof cleanupAgentRpc>> {
-  return (await import("./maintenance")).withCleanupLock(async () => {
+  return withCleanupLock(async () => {
     const allAgents = await listAllAgents(paseo);
     const agent = allAgents.find((candidate) => candidate.id === input.agentId);
     if (!agent) throw new Error(`找不到 Agent：${input.agentId}`);
@@ -228,11 +240,27 @@ export async function cleanupAgent(
   });
 }
 
+export async function cleanupAgents(
+  input: RpcInput<typeof cleanupAgentsRpc>,
+  { paseo }: PluginHandlerContext,
+): Promise<RpcOutput<typeof cleanupAgentsRpc>> {
+  return withCleanupLock(async () => {
+    const allAgents = await listAllAgents(paseo);
+    const wanted = new Set(input.agentIds);
+    const targets = allAgents.filter((agent) => wanted.has(agent.id));
+    const missing = input.agentIds.filter((id) => !targets.some((agent) => agent.id === id));
+    const result = await deleteAgents(targets, paseo, input.deletePiSessions);
+    result.warnings.push(...missing.map((id) => `${id}: 找不到这个 Agent，可能已被删除`));
+    if (result.deletedAgentIds.length === 0) throw new Error(result.warnings[0] ?? "没有删除任何 Agent");
+    return result;
+  });
+}
+
 export async function cleanupWorkspace(
   input: RpcInput<typeof cleanupWorkspaceRpc>,
   { paseo }: PluginHandlerContext,
 ): Promise<RpcOutput<typeof cleanupWorkspaceRpc>> {
-  return (await import("./maintenance")).withCleanupLock(async () => {
+  return withCleanupLock(async () => {
     const [allAgents, activeWorkspaces] = await Promise.all([
       listAllAgents(paseo),
       listAllActiveWorkspaces(paseo),
@@ -255,8 +283,17 @@ export async function cleanupWorkspace(
     if (targets.length === 0) {
       result.warnings.push(input.onlyFinished
         ? "这个 Workspace 下没有已归档或已关闭的 Agent。"
-        : "这个 Workspace 下没有 Agent；归档记录可在 Cleaner 中使用停机删除移除。");
+        : "这个 Workspace 下没有 Agent。");
     }
     return { workspaceArchived, ...result };
   });
+}
+
+export async function readCatalog(_input: RpcInput<typeof catalogRpc>, { paseo }: PluginHandlerContext) {
+  const agents = await listAllAgents(paseo);
+  const archivedAgents = agents.filter(a => a.archivedAt && a.status === "closed").map(a => ({
+    id: a.id, title: a.title, provider: a.provider, cwd: a.cwd, workspaceId: a.workspaceId, status: "closed" as const, archivedAt: a.archivedAt!,
+    updatedAt: a.updatedAt, createdAt: a.createdAt,
+  }));
+  return { ...await catalog(), archivedAgents };
 }

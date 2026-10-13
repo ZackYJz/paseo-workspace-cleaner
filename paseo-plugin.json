@@ -1,4 +1,6 @@
 {
   "id": "paseo-workspace-cleaner",
-  "requirements": { "paseo": ">=0.8.0" }
+  "name": "清理",
+  "description": "在线清理已归档的 Workspace 和 Agent：删除 Agent 与时间线、把 Pi session 移到废纸篓，可选归档满宽限期后自动清理",
+  "requirements": { "paseo": ">=0.11.0" }
 }
