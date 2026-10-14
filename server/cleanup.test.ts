@@ -131,3 +131,24 @@ test("cleanupAgents deletes every listed Agent once and reports IDs that no long
     if (previousHome === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = previousHome;
   }
 });
+
+test("批量删除只在最后读一次目录核对，删除后仍在的单独报出", async () => {
+  const listed = ["one", "two", "three"].map(id => ({ id, title: id, provider: "codex", cwd: "/tmp/x", workspaceId: "w", persistence: null }));
+  const removed = new Set<string>();
+  // "two" 的删除命令确认成功，但目录里还在：只能由最后那次核对发现。
+  cli.run.mockImplementation((_file: string, args: string[]) => { if (args[2] !== "two") removed.add(args[2]!); return { deletedCount: 1, agentIds: [args[2]] }; });
+  const list = vi.fn(async () => ({ entries: listed.filter(a => !removed.has(a.id)).map(agent => ({ agent })), pageInfo: { nextCursor: null } }));
+  const paseo = { agents: { list } } as unknown as PluginHandlerContext["paseo"];
+  const previousHome = process.env.PASEO_HOME;
+  process.env.PASEO_HOME = await mkdtemp(path.join(tmpdir(), "paseo-batch-"));
+  try {
+    const result = await cleanupAgents({ agentIds: ["one", "two", "three"], deletePiSessions: false, confirmation: "DELETE" }, { paseo });
+    expect(result.deletedAgentIds).toEqual(["one", "three"]);
+    expect(result.warnings).toEqual(["two: Agent 删除后仍然存在"]);
+    // 一次读目标，一次删除后核对；不随 Agent 数量增长。
+    expect(list).toHaveBeenCalledTimes(2);
+  } finally {
+    cli.run.mockReset();
+    if (previousHome === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = previousHome;
+  }
+});

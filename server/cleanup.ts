@@ -176,16 +176,43 @@ export async function removePiSession(
   }
 }
 
-// 插件子进程里唯一的删除通道：手动清理与自动清理互斥，不交错执行。
+// 插件子进程里唯一的删除通道：所有清理按到达顺序排队，一次只跑一个，不交错执行。
 // 进程内互斥即可，不再需要文件锁，进程崩溃也不会留下卡死的锁。
+//
+// 排队而不是直接拒绝：连续删几个 Workspace 时，上一个还在后台删 Agent，下一个请求就到了
+// （浮层点外面就关，但服务端还在跑），直接拒绝会让用户莫名其妙地失败。
+// 等待有上限：客户端插件 RPC 默认 60 秒超时，等太久客户端先报错、服务端过后却照删，
+// 结果和提示对不上。所以最多等 CLEANUP_QUEUE_WAIT_MS，等不到就放弃这次请求，什么都不删。
+export const CLEANUP_QUEUE_WAIT_MS = 40_000;
+let queueTail: Promise<void> = Promise.resolve();
 let cleanupRunning = false;
-export async function withCleanupLock<T>(action: () => Promise<T>): Promise<T> {
-  if (cleanupRunning) throw new Error("已有清理任务在执行，请等待完成后再操作");
-  cleanupRunning = true;
-  try { return await action(); }
-  finally { cleanupRunning = false; }
+let cleanupWaiting = 0;
+export function withCleanupLock<T>(action: () => Promise<T>, waitMs = CLEANUP_QUEUE_WAIT_MS): Promise<T> {
+  const previous = queueTail;
+  let release!: () => void;
+  queueTail = new Promise<void>((resolve) => { release = resolve; });
+  cleanupWaiting++;
+  return new Promise<T>((resolve, reject) => {
+    let abandoned = false;
+    const timer = setTimeout(() => {
+      abandoned = true;
+      cleanupWaiting--;
+      reject(new Error(`上一个清理任务还没完成（已等待 ${Math.round(waitMs / 1000)} 秒），这次没有删除任何内容，请稍后重试。`));
+    }, waitMs);
+    void previous.then(async () => {
+      clearTimeout(timer);
+      // 放弃了的请求也要按顺序交出位置，否则排在它后面的会一直等下去。
+      if (abandoned) { release(); return; }
+      cleanupWaiting--;
+      cleanupRunning = true;
+      try { resolve(await action()); }
+      catch (error) { reject(error); }
+      finally { cleanupRunning = false; release(); }
+    });
+  });
 }
-export const cleanupBusy = () => cleanupRunning;
+/** 有任务在跑或在排队。自动清理据此让路，不和手动清理抢位置。 */
+export const cleanupBusy = () => cleanupRunning || cleanupWaiting > 0;
 
 export async function deleteAgents(
   targets: readonly AgentSnapshot[],
@@ -196,19 +223,30 @@ export async function deleteAgents(
   const piSessions: PiSessionStatus[] = [];
   const warnings: string[] = [];
 
+  // 逐个调用官方删除命令，全部跑完后只读一次目录做核对。原先每删一个就读两遍完整目录
+  // （每遍还可能为磁盘上的归档记录逐个起 `paseo agent inspect`），几个 Agent 就要好几秒，
+  // 连续清理时很容易和下一个请求撞上。
+  const confirmed: AgentSnapshot[] = [];
   for (const agent of targets) {
     try {
       await deletePaseoAgent(agent.id);
-      if ((await listAllAgents(paseo)).some(a => a.id === agent.id)) throw new Error("Agent 删除后仍然存在");
-      deletedAgentIds.push(agent.id);
+      confirmed.push(agent);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       warnings.push(`${agent.title ?? agent.id}: ${message}`);
     }
   }
-  // Recheck references after all deletions, including targets whose deletion failed.
-  for (const agent of targets.filter(a => deletedAgentIds.includes(a.id))) {
-    piSessions.push(await removePiSession(toPiSessionCandidate(agent), await listAllAgents(paseo), new Set(), deletePiSessions));
+  if (confirmed.length === 0) return { deletedAgentIds, piSessions, warnings };
+
+  // 核对和 Pi session 引用检查共用这一份删除后的目录，包括删除失败、仍然存在的 Agent。
+  const remaining = await listAllAgents(paseo);
+  const stillThere = new Set(remaining.map(a => a.id));
+  for (const agent of confirmed) {
+    if (stillThere.has(agent.id)) warnings.push(`${agent.title ?? agent.id}: Agent 删除后仍然存在`);
+    else deletedAgentIds.push(agent.id);
+  }
+  for (const agent of confirmed.filter(a => deletedAgentIds.includes(a.id))) {
+    piSessions.push(await removePiSession(toPiSessionCandidate(agent), remaining, new Set(), deletePiSessions));
   }
   return { deletedAgentIds, piSessions, warnings };
 }

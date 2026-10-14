@@ -9,7 +9,7 @@ vi.mock("node:child_process", async importOriginal => ({
     inspect.calls(args); callback(null, { stdout: JSON.stringify(inspect.output), stderr: "" });
   },
 }));
-import { withCleanupLock } from "./cleanup";
+import { cleanupBusy, withCleanupLock } from "./cleanup";
 import { supplementArchivedAgents } from "./registry";
 let home: string;
 beforeEach(async () => {
@@ -29,10 +29,45 @@ test.each([{ Status: "running" }, { Archived: false }, { PendingPermissions: [{}
   Object.assign(inspect.output, override);
   await expect(supplementArchivedAgents([], home)).rejects.toThrow();
 });
-test("manual and automatic cleanup share one in-process lock that is released on failure", async () => {
-  await withCleanupLock(async () => {
-    await expect(withCleanupLock(async () => {})).rejects.toThrow("已有清理任务");
+test("清理按到达顺序排队，失败也会交出锁", async () => {
+  const order: string[] = [];
+  let finishFirst!: () => void;
+  const first = withCleanupLock(async () => {
+    order.push("first:start");
+    await new Promise<void>((resolve) => { finishFirst = resolve; });
+    order.push("first:end");
   });
+  const second = withCleanupLock(async () => { order.push("second"); return "ok"; });
+  await Promise.resolve();
+  expect(cleanupBusy()).toBe(true);
+  expect(order).toEqual(["first:start"]);
+  finishFirst();
+  await expect(second).resolves.toBe("ok");
+  await first;
+  expect(order).toEqual(["first:start", "first:end", "second"]);
+  expect(cleanupBusy()).toBe(false);
+
   await expect(withCleanupLock(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
   await expect(withCleanupLock(async () => "released")).resolves.toBe("released");
+});
+
+test("排队超过上限就放弃：不执行、给出明确提示，也不卡住后面的请求", async () => {
+  vi.useFakeTimers();
+  try {
+    let finishFirst!: () => void;
+    const first = withCleanupLock(() => new Promise<void>((resolve) => { finishFirst = resolve; }));
+    const late = vi.fn(async () => "never");
+    const abandoned = withCleanupLock(late, 1000);
+    const abandonedResult = expect(abandoned).rejects.toThrow("这次没有删除任何内容");
+    await vi.advanceTimersByTimeAsync(1000);
+    await abandonedResult;
+    const third = withCleanupLock(async () => "third");
+    finishFirst();
+    await first;
+    await expect(third).resolves.toBe("third");
+    expect(late).not.toHaveBeenCalled();
+    expect(cleanupBusy()).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
 });
