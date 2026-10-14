@@ -80,23 +80,48 @@ const withAgents = (...list: Array<Record<string, unknown>>) => mocks.list.mockR
 const tab = (label: string) => renderer.root.findAllByType("Button" as never).find(node => node.props.accessibilityRole === "tab" && String(node.props.accessibilityLabel).startsWith(label))!;
 const input = () => renderer.root.findByType("Input" as never);
 
-test("defaults to the cleanable filter: idle agents stay hidden until 全部 is chosen", async () => {
+test("默认显示全部，「可清理」只留已归档和已关闭", async () => {
   withAgents(agent, closed, archived);
-  await mount();
-  expect(visible()).toContain("已关闭的会话");
-  expect(visible()).toContain("已归档的会话");
-  expect(visible()).not.toContain("这是 Agent 标题");
-  expect(tab("可清理").props.accessibilityLabel).toBe("可清理 2");
-  expect(tab("可清理").props.accessibilityState.selected).toBe(true);
-  await act(async () => tab("全部").props.onPress());
-  expect(visible()).toContain("这是 Agent 标题");
-});
-
-test("falls back to 全部 when nothing is cleanable instead of showing an empty page", async () => {
   await mount();
   expect(tab("全部").props.accessibilityState.selected).toBe(true);
   expect(visible()).toContain("这是 Agent 标题");
-  expect(visible()).toContain("真实 Workspace 名称");
+  expect(visible()).toContain("已关闭的会话");
+  expect(tab("可清理").props.accessibilityLabel).toBe("可清理 2");
+  await act(async () => tab("可清理").props.onPress());
+  expect(visible()).not.toContain("这是 Agent 标题");
+  expect(visible()).toContain("已归档的会话");
+});
+
+test("等你处理：默认视图顶部列出，「需要处理」筛选只留它们，空结果可回到全部", async () => {
+  const waiting = { ...agent, id: "agent-wait", title: "等待授权的会话", attentionReason: "permission", requiresAttention: true };
+  const running = { ...agent, id: "agent-run", title: "正在跑的会话", status: "running" };
+  withAgents(agent, waiting, running, archived);
+  await mount();
+  expect(visible()).toContain("等你处理 · 1");
+  expect(tab("需要处理").props.accessibilityLabel).toBe("需要处理 1");
+  expect(tab("运行中").props.accessibilityLabel).toBe("运行中 1");
+  await act(async () => tab("需要处理").props.onPress());
+  expect(visible()).not.toContain("等你处理 · 1");
+  expect(visible()).toContain("等待授权的会话");
+  expect(visible()).not.toContain("正在跑的会话");
+  expect(visible()).not.toContain("这是 Agent 标题");
+  await act(async () => tab("运行中").props.onPress());
+  expect(visible()).toContain("正在跑的会话");
+  expect(visible()).not.toContain("等待授权的会话");
+});
+
+test("有 navigation 时点行打开会话、点勾选框才选中；「等你处理」行也能打开", async () => {
+  const openAgent = vi.fn();
+  const waiting = { ...agent, id: "agent-wait", title: "等待授权的会话", attentionReason: "permission", requiresAttention: true };
+  withAgents(agent, waiting);
+  await act(async () => { renderer = create(<MainSurface {...props} navigation={{ openAgent, openWorkspace: vi.fn() }} />); });
+  await press("打开 这是 Agent 标题，空闲 · pi · 无活动");
+  expect(openAgent).toHaveBeenCalledWith({ agentId: agent.id });
+  expect(visible()).not.toContain("已选");
+  await press("选择 这是 Agent 标题");
+  expect(visible()).toContain("已选 1 个 Agent");
+  await press("打开 等待授权的会话，等待授权");
+  expect(openAgent).toHaveBeenLastCalledWith({ agentId: "agent-wait" });
 });
 
 test("search matches titles and workspace names, and an empty result offers to clear it", async () => {

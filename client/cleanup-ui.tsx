@@ -13,7 +13,11 @@ export function agentStatusText(agent: { status?: string | null; archivedAt?: st
 }
 
 export type PaseoApi = ReturnType<typeof usePaseo>;
-export type ListedAgent = Pick<Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number]["agent"], "id" | "title" | "provider" | "cwd" | "workspaceId" | "status" | "archivedAt"> & ActivityRecord;
+export type ListedAgent = Pick<Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number]["agent"], "id" | "title" | "provider" | "cwd" | "workspaceId" | "status" | "archivedAt"> & ActivityRecord & {
+  requiresAttention?: boolean;
+  attentionReason?: string | null;
+  attentionTimestamp?: string | null;
+};
 
 export interface CleanupTheme {
   colors: PluginSurfaceProps["theme"]["colors"];

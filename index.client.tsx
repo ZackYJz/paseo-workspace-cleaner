@@ -6,13 +6,14 @@ import { MainSurface } from "./client/main";
 import { CleanerSettings } from "./client/settings";
 
 function CleanerSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
-  return <SidebarRow icon="BrushCleaning" active={currentScreen?.screenId === "main"} onPress={() => openScreen({ screenId: "main" })} />;
+  return <SidebarRow icon="MessagesSquare" active={currentScreen?.screenId === "main"} onPress={() => openScreen({ screenId: "main" })} />;
 }
 
 export default function contribute(client: PluginClientContext) {
   // 页面与侧栏项沿用旧 ID "main"，已保存的链接仍能打开。
-  client.addScreen({ id: "main", title: "清理", Component: MainSurface });
-  client.addSidebarHeaderItem({ id: "main", title: "清理", Component: CleanerSidebarItem });
+  // 原 workspace-agent-count 的 Agent 总览并入这里：浏览和批量清理是同一份列表。
+  client.addScreen({ id: "main", title: "会话", Component: MainSurface });
+  client.addSidebarHeaderItem({ id: "main", title: "会话", Component: CleanerSidebarItem });
   // 命令回调起不了浮层：先存意图再打开主页，由主页消费意图弹出确认窗口。
   client.addCommandCenterItem({
     id: "open-workspace-cleanup",

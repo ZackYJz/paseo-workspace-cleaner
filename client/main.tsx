@@ -3,15 +3,24 @@ import { Icon, useToast } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { activityTime, relativeLabel, workspaceActivity } from "../shared/activity";
+import { agentState, compactCount, isNotable, isRunningState, needsAttention, workspaceState, type Tone } from "../shared/agent-state";
 import { catalogRpc, type ProjectRecord, type WorkspaceRecord } from "../shared/catalog";
 import { cleanupAgentsRpc, isFinishedAgent } from "../shared/cleanup";
 import { onCleanupRequested, takePendingCleanup, type CleanupIntent } from "./cleanup-intent";
 import { ConfirmCleanup, useAgentCleanup, useWorkspaceCleanup } from "./cleanup-dialog";
 import { ActionButton, agentStatusText, listAllAgents, type CleanupTheme, type ListedAgent } from "./cleanup-ui";
 import { useCleanupDefaults } from "./defaults";
+import { useLiveDirectory } from "./live-refresh";
 
 type Colors = CleanupTheme["colors"];
-type Filter = "cleanable" | "all";
+type Filter = "all" | "attention" | "running" | "cleanable";
+type Navigation = PluginScreenProps["navigation"];
+type LiveWorkspace = { status: string | null; diffStat: { additions: number; deletions: number } | null };
+
+function toneColor(colors: Colors, tone: Tone): string {
+  return tone === "danger" ? colors.statusDanger : tone === "warning" ? colors.statusWarning
+    : tone === "success" ? colors.statusSuccess : tone === "accent" ? colors.accent : colors.foregroundMuted;
+}
 
 // 只给 6 位 hex 叠透明度；主题色不是这种格式时退回中性底色，不猜。
 function tint(color: string, alpha: string, fallback: string): string {
@@ -24,11 +33,11 @@ function useStyles(colors: Colors, compact: boolean) {
     scroll: { flex: 1, minWidth: 0 },
     content: { width: "100%" as const, maxWidth: 880, alignSelf: "center" as const, paddingHorizontal: compact ? 12 : 24, paddingTop: compact ? 12 : 20, gap: 16 },
     headerRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 12, minWidth: 0 },
-    title: { color: colors.foreground, fontSize: 20, lineHeight: 28, fontWeight: "600" as const },
     stats: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
     toolbar: { flexDirection: compact ? "column" as const : "row" as const, alignItems: compact ? "stretch" as const : "center" as const, gap: 8, minWidth: 0 },
     segment: { flexDirection: "row" as const, padding: 2, borderRadius: 8, backgroundColor: colors.surface1, borderWidth: 1, borderColor: colors.border, alignSelf: compact ? "stretch" as const : "auto" as const },
-    segmentItem: { flex: compact ? 1 : undefined, flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "center" as const, gap: 6, height: 28, paddingHorizontal: 12, borderRadius: 6 },
+    // 窄屏按内容宽度分剩余空间，不强制等宽：四个筛选等宽会超出 375 宽的屏幕。
+    segmentItem: { flexGrow: compact ? 1 : 0, flexShrink: 1, flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "center" as const, gap: compact ? 4 : 6, height: 28, paddingHorizontal: compact ? 8 : 12, borderRadius: 6 },
     segmentText: { color: colors.foregroundMuted, fontSize: 13, fontWeight: "500" as const },
     segmentCount: { color: colors.foregroundMuted, fontSize: 12, fontVariant: ["tabular-nums" as const] },
     search: { flex: compact ? undefined : 1, minWidth: 0, flexDirection: "row" as const, alignItems: "center" as const, gap: 8, height: 34, paddingHorizontal: 10, borderRadius: 8, backgroundColor: colors.surface1, borderWidth: 1, borderColor: colors.border },
@@ -58,15 +67,23 @@ function useStyles(colors: Colors, compact: boolean) {
     scopeItem: { color: colors.foreground, fontSize: 13, lineHeight: 20 },
     scopeMeta: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
     warning: { color: colors.statusWarning, fontSize: 12, lineHeight: 18 },
+    panel: { borderRadius: 10, borderWidth: 1, borderColor: colors.statusDanger, overflow: "hidden" as const },
+    panelHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, paddingHorizontal: 12, paddingTop: 10, paddingBottom: 4 },
+    panelTitle: { color: colors.statusDanger, fontSize: 12, lineHeight: 16, fontWeight: "600" as const },
+    panelRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 10, paddingHorizontal: 12, paddingVertical: 8, minWidth: 0 },
+    pill: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 7, paddingVertical: 1 },
+    pillText: { fontSize: 11, lineHeight: 15, fontWeight: "600" as const },
+    diff: { fontSize: 12, lineHeight: 16, fontVariant: ["tabular-nums" as const] },
   }), [colors, compact]);
 }
 type Styles = ReturnType<typeof useStyles>;
 
 function StatusDot({ agent, colors }: { agent: ListedAgent; colors: Colors }) {
-  // 填充 = 还活着（运行中绿、空闲灰），空心 = 已结束（已关闭、已归档）。
-  const live = !isFinishedAgent(agent);
-  const color = agent.status === "running" ? colors.statusSuccess : agent.status === "error" ? colors.statusDanger : colors.foregroundMuted;
-  return <View style={{ width: 8, height: 8, borderRadius: 4, borderWidth: 1.5, borderColor: color, backgroundColor: live ? color : "transparent", opacity: agent.archivedAt ? 0.6 : 1 }} />;
+  // 实心 = 状态有话要说（等待授权、出错、运行中、已完成），空心 = 常态（空闲、已关闭、已归档）。
+  const state = agentState(agent);
+  const solid = state.tone !== "muted";
+  const color = toneColor(colors, state.tone);
+  return <View style={{ width: 8, height: 8, borderRadius: 4, borderWidth: 1.5, borderColor: color, backgroundColor: solid ? color : "transparent", opacity: agent.archivedAt ? 0.6 : 1 }} />;
 }
 
 function Checkbox({ state, colors, label, onPress }: { state: "on" | "off" | "mixed"; colors: Colors; label: string; onPress: () => void }) {
@@ -79,17 +96,19 @@ function Checkbox({ state, colors, label, onPress }: { state: "on" | "off" | "mi
 }
 
 function Segment({ value, onChange, counts, styles, colors }: { value: Filter; onChange: (v: Filter) => void; counts: Record<Filter, number>; styles: Styles; colors: Colors }) {
-  const items: Array<[Filter, string]> = [["cleanable", "可清理"], ["all", "全部"]];
+  // 状态类筛选的数量带颜色，扫一眼工具栏就知道有没有要处理的。
+  const items: Array<[Filter, string, Tone | null]> = [["all", "全部", null], ["attention", "需要处理", "danger"], ["running", "运行中", "accent"], ["cleanable", "可清理", null]];
   return (
     <View style={styles.segment} accessibilityRole="tablist">
-      {items.map(([key, label]) => {
+      {items.map(([key, label, tone]) => {
         const active = key === value;
+        const countColor = tone && counts[key] > 0 ? toneColor(colors, tone) : active ? colors.foreground : undefined;
         return (
           <Pressable key={key} accessibilityRole="tab" accessibilityState={{ selected: active }} accessibilityLabel={`${label} ${counts[key]}`}
             onPress={() => onChange(key)}
             style={({ pressed }) => [styles.segmentItem, active && { backgroundColor: colors.surface0 }, pressed && !active && { opacity: 0.7 }]}>
             <Text style={[styles.segmentText, active && { color: colors.foreground }]}>{label}</Text>
-            <Text style={[styles.segmentCount, active && { color: colors.foreground }]}>{counts[key]}</Text>
+            <Text style={[styles.segmentCount, countColor ? { color: countColor } : null]}>{counts[key]}</Text>
           </Pressable>
         );
       })}
@@ -97,11 +116,52 @@ function Segment({ value, onChange, counts, styles, colors }: { value: Filter; o
   );
 }
 
-function AgentRow({ agent, selected, onToggle, styles, colors, compact }: { agent: ListedAgent; selected: boolean; onToggle: () => void; styles: Styles; colors: Colors; compact: boolean }) {
-  const meta = `${agent.provider} · ${agentStatusText(agent)} · ${relativeLabel(activityTime(agent))}`;
+function AttentionPanel({ agents, labelOf, navigation, styles, colors }: {
+  agents: ListedAgent[]; labelOf: (agent: ListedAgent) => string; navigation: Navigation; styles: Styles; colors: Colors;
+}) {
   return (
-    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`${agent.title ?? "未命名 Agent"}，${meta}`}
-      onPress={onToggle}
+    <View style={styles.panel}>
+      <View style={styles.panelHead}>
+        <Icon name="BellRing" size={13} color={colors.statusDanger} />
+        <Text style={styles.panelTitle}>{`等你处理 · ${agents.length}`}</Text>
+      </View>
+      {agents.map(agent => {
+        const state = agentState(agent);
+        const since = Date.parse(agent.attentionTimestamp ?? "") || activityTime(agent);
+        const body = (
+          <>
+            <StatusDot agent={agent} colors={colors} />
+            <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+              <Text style={styles.agentTitle} numberOfLines={2}>{agent.title ?? "未命名 Agent"}</Text>
+              <Text style={styles.workspaceMeta} numberOfLines={1}>{labelOf(agent)}</Text>
+            </View>
+            <View style={{ alignItems: "flex-end", gap: 2 }}>
+              <Text style={[styles.agentMeta, { color: toneColor(colors, state.tone), fontWeight: "600" }]}>{state.label}</Text>
+              <Text style={styles.agentMeta}>{relativeLabel(since)}</Text>
+            </View>
+          </>
+        );
+        return navigation ? (
+          <Pressable key={agent.id} accessibilityRole="button" accessibilityLabel={`打开 ${agent.title ?? agent.id}，${state.label}`}
+            onPress={() => navigation.openAgent({ agentId: agent.id })}
+            style={({ pressed, hovered }: { pressed: boolean; hovered?: boolean }) => [styles.panelRow, (pressed || hovered) && { backgroundColor: colors.surface1 }]}>
+            {body}
+          </Pressable>
+        ) : <View key={agent.id} style={styles.panelRow}>{body}</View>;
+      })}
+    </View>
+  );
+}
+
+function AgentRow({ agent, selected, onToggle, navigation, styles, colors, compact }: { agent: ListedAgent; selected: boolean; onToggle: () => void; navigation: Navigation; styles: Styles; colors: Colors; compact: boolean }) {
+  const state = agentState(agent);
+  const rest = `${agent.provider} · ${relativeLabel(activityTime(agent))}`;
+  // 点行打开会话，点勾选框才是选中（同邮件列表）。宿主没有 navigation 时退回整行勾选。
+  const open = navigation ? () => navigation.openAgent({ agentId: agent.id }) : onToggle;
+  return (
+    <Pressable accessibilityRole={navigation ? "button" : "checkbox"} accessibilityState={navigation ? undefined : { checked: selected }}
+      accessibilityLabel={`${navigation ? "打开 " : ""}${agent.title ?? "未命名 Agent"}，${state.label} · ${rest}`}
+      onPress={open}
       style={({ pressed, hovered }: { pressed: boolean; hovered?: boolean }) => [styles.agentRow,
         selected ? { backgroundColor: tint(colors.accent, "1f", colors.surface2) } : (pressed || hovered) ? { backgroundColor: colors.surface1 } : null]}>
       <View style={styles.agentMain}>
@@ -109,13 +169,16 @@ function AgentRow({ agent, selected, onToggle, styles, colors, compact }: { agen
         <StatusDot agent={agent} colors={colors} />
         <Text style={[styles.agentTitle, agent.archivedAt ? { color: colors.foregroundMuted } : null]} numberOfLines={compact ? 2 : 1}>{agent.title ?? "未命名 Agent"}</Text>
       </View>
-      <Text style={styles.agentMeta}>{meta}</Text>
+      <Text style={styles.agentMeta}>
+        <Text style={isNotable(state) ? { color: toneColor(colors, state.tone), fontWeight: "600" } : null}>{state.label}</Text>
+        {` · ${rest}`}
+      </Text>
     </Pressable>
   );
 }
 
-function WorkspaceGroup({ first, workspace, workspaceId, projectRoot, agents, selected, onToggle, onToggleAll, onDone, styles, colors, theme }: {
-  first: boolean; workspace?: WorkspaceRecord; workspaceId?: string; projectRoot?: string; agents: ListedAgent[];
+function WorkspaceGroup({ first, workspace, workspaceId, live, navigation, projectRoot, agents, selected, onToggle, onToggleAll, onDone, styles, colors, theme }: {
+  first: boolean; workspace?: WorkspaceRecord; workspaceId?: string; live?: LiveWorkspace; navigation: Navigation; projectRoot?: string; agents: ListedAgent[];
   selected: ReadonlySet<string>; onToggle: (id: string) => void; onToggleAll: (ids: string[], on: boolean) => void; onDone: () => void;
   styles: Styles; colors: Colors; theme: CleanupTheme;
 }) {
@@ -126,15 +189,38 @@ function WorkspaceGroup({ first, workspace, workspaceId, projectRoot, agents, se
   const cwd = workspace?.cwd ?? agents[0]?.cwd;
   // 只在不是 Project 根目录时给出位置，取最后一段（通常是 worktree 名），完整路径放无障碍标签里。
   const place = cwd && cwd !== projectRoot ? cwd.split("/").filter(Boolean).pop() : undefined;
-  const sorted = [...agents].sort((a, b) => activityTime(b) - activityTime(a) || a.id.localeCompare(b.id));
+  // 要你处理的排前面，同一档里最近活动的在前。
+  const sorted = [...agents].sort((a, b) => agentState(a).rank - agentState(b).rank || activityTime(b) - activityTime(a) || a.id.localeCompare(b.id));
+  const wsState = workspaceState(live?.status);
+  const diff = live?.diffStat;
+  const showDiff = Boolean(diff && (diff.additions || diff.deletions));
+  const openWorkspace = navigation && workspaceId && !workspace?.archivedAt ? () => navigation.openWorkspace({ workspaceId }) : undefined;
+  const title = <Text style={styles.workspaceName} numberOfLines={1}>{name}</Text>;
   return (
     <View style={first ? null : styles.workspaceDivider}>
       <View style={styles.workspaceRow} accessibilityLabel={`Workspace ${name}${cwd ? `，${cwd}` : ""}`}>
         <Checkbox state={state} colors={colors} label={`选择 ${name} 下全部 Agent`} onPress={() => onToggleAll(ids, state !== "on")} />
         <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minWidth: 0 }}>
-            <Text style={styles.workspaceName} numberOfLines={1}>{name}</Text>
+          {/* 窄屏允许状态胶囊和 diff 折到下一行，不把页面最小宽度撑大。 */}
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: theme.compact ? "wrap" : "nowrap", columnGap: 8, rowGap: 2, minWidth: 0 }}>
+            {openWorkspace ? (
+              <Pressable accessibilityRole="link" accessibilityLabel={`打开 Workspace ${name}`} onPress={openWorkspace}
+                style={({ pressed }) => ({ flexShrink: 1, minWidth: 0, opacity: pressed ? 0.6 : 1 })}>
+                {title}
+              </Pressable>
+            ) : title}
             {workspace?.archivedAt ? <Text style={styles.badge}>已归档</Text> : null}
+            {!workspace?.archivedAt && isNotable(wsState) && wsState.tone !== "success" ? (
+              <View style={[styles.pill, { borderColor: toneColor(colors, wsState.tone) }]}>
+                <Text style={[styles.pillText, { color: toneColor(colors, wsState.tone) }]}>{wsState.label}</Text>
+              </View>
+            ) : null}
+            {showDiff && diff ? (
+              <Text style={styles.diff}>
+                <Text style={{ color: colors.statusSuccess }}>{`+${compactCount(diff.additions)}`}</Text>
+                <Text style={{ color: colors.statusDanger }}>{` −${compactCount(diff.deletions)}`}</Text>
+              </Text>
+            ) : null}
           </View>
           <Text style={styles.workspaceMeta} numberOfLines={1}>
             {[`${agents.length} 个 Agent`, relativeLabel(workspaceActivity(workspace, agents)), place].filter(Boolean).join(" · ")}
@@ -143,7 +229,7 @@ function WorkspaceGroup({ first, workspace, workspaceId, projectRoot, agents, se
         {workspaceId && !workspace?.archivedAt ? <WorkspaceCleanupAction workspaceId={workspaceId} label={name} theme={theme} onDone={onDone} trigger="icon" /> : null}
       </View>
       {sorted.map(agent => (
-        <AgentRow key={agent.id} agent={agent} selected={selected.has(agent.id)} onToggle={() => onToggle(agent.id)} styles={styles} colors={colors} compact={theme.compact} />
+        <AgentRow key={agent.id} agent={agent} selected={selected.has(agent.id)} onToggle={() => onToggle(agent.id)} navigation={navigation} styles={styles} colors={colors} compact={theme.compact} />
       ))}
     </View>
   );
@@ -248,7 +334,19 @@ function BatchConfirm({ agents, open, onOpenChange, onDone, theme, styles }: {
   );
 }
 
-export function MainSurface({ theme, layout }: PluginScreenProps) {
+// 活跃 Workspace 的宿主汇总状态和 diff 只在目录接口里有，注册表里没有。
+async function listLiveWorkspaces(paseo: ReturnType<typeof usePaseo>): Promise<ReadonlyMap<string, LiveWorkspace>> {
+  const result = new Map<string, LiveWorkspace>();
+  let cursor: string | undefined;
+  do {
+    const page = await paseo.workspaces.list({ page: { limit: 200, ...(cursor ? { cursor } : {}) } });
+    for (const workspace of page.entries) result.set(workspace.id, { status: workspace.status ?? null, diffStat: workspace.diffStat ?? null });
+    cursor = page.pageInfo.nextCursor ?? undefined;
+  } while (cursor);
+  return result;
+}
+
+export function MainSurface({ theme, layout, navigation }: PluginScreenProps) {
   const paseo = usePaseo();
   const getCatalog = useRpc(catalogRpc);
   const { expandProjectsByDefault } = useCleanupDefaults();
@@ -258,11 +356,12 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
   const [agents, setAgents] = useState<ListedAgent[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [liveWorkspaces, setLiveWorkspaces] = useState<ReadonlyMap<string, LiveWorkspace>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [intent, setIntent] = useState<CleanupIntent | null>(null);
-  const [filter, setFilter] = useState<Filter | null>(null);
+  const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -279,7 +378,7 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
     setLoading(true);
     setError(null);
     try {
-      const [nextAgents, nextCatalog] = await Promise.all([listAllAgents(paseo), getCatalog({})]);
+      const [nextAgents, nextCatalog, nextLive] = await Promise.all([listAllAgents(paseo), getCatalog({}), listLiveWorkspaces(paseo)]);
       const merged = new Map(nextAgents.map(a => [a.id, a]));
       for (const agent of nextCatalog.archivedAgents ?? []) if (!merged.has(agent.id)) merged.set(agent.id, agent);
       const all = [...merged.values()];
@@ -287,6 +386,7 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
       // 已归档且没有 Agent 的 Workspace 在 Paseo 里已经看不到，这里也不再列出。
       setWorkspaces(nextCatalog.workspaces.filter(w => !w.archivedAt || all.some(a => a.workspaceId === w.workspaceId)));
       setProjects(nextCatalog.projects);
+      setLiveWorkspaces(nextLive);
       setSelected(prev => new Set([...prev].filter(id => merged.has(id))));
       setLoaded(true);
     } catch (loadError) {
@@ -296,16 +396,27 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
     }
   }, [paseo, getCatalog]);
   useEffect(() => void refresh(), [refresh]);
+  // 会话开始、结束、等待授权、归档时自动重读；流式输出不触发。
+  useLiveDirectory(paseo, () => void refresh());
 
-  const cleanableCount = useMemo(() => agents.filter(a => isFinishedAgent(a)).length, [agents]);
-  // 首次加载后定默认筛选：有可清理的就只看它们，否则看全部。
-  const activeFilter: Filter = filter ?? (loaded && cleanableCount === 0 ? "all" : "cleanable");
+  const counts = useMemo<Record<Filter, number>>(() => {
+    const live = agents.filter(a => !a.archivedAt).map(agentState);
+    return {
+      all: agents.length,
+      attention: live.filter(needsAttention).length,
+      running: live.filter(isRunningState).length,
+      cleanable: agents.filter(a => isFinishedAgent(a)).length,
+    };
+  }, [agents]);
+  const activeFilter = filter;
 
   const projectOf = useCallback((agent: ListedAgent) => workspaces.find(w => w.workspaceId === agent.workspaceId)?.projectId ?? "unknown", [workspaces]);
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return agents.filter(agent => {
       if (activeFilter === "cleanable" && !isFinishedAgent(agent)) return false;
+      if (activeFilter === "attention" && (agent.archivedAt || !needsAttention(agentState(agent)))) return false;
+      if (activeFilter === "running" && (agent.archivedAt || !isRunningState(agentState(agent)))) return false;
       if (!needle) return true;
       const workspace = workspaces.find(w => w.workspaceId === agent.workspaceId);
       const project = projects.find(p => p.projectId === workspace?.projectId);
@@ -325,6 +436,15 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
     }).sort((a, b) => b.latest - a.latest || a.projectId.localeCompare(b.projectId));
   }, [visible, workspaces, projects, projectOf]);
 
+  // 「等你处理」只在默认视图出现；筛选或搜索时下面的列表已经只剩这些行。
+  const waiting = useMemo(() => activeFilter !== "all" || query.trim() ? [] : agents
+    .filter(a => !a.archivedAt && needsAttention(agentState(a)))
+    .sort((a, b) => (Date.parse(a.attentionTimestamp ?? "") || activityTime(a)) - (Date.parse(b.attentionTimestamp ?? "") || activityTime(b))), [agents, activeFilter, query]);
+  const placeOf = (agent: ListedAgent) => {
+    const workspace = workspaces.find(w => w.workspaceId === agent.workspaceId);
+    const project = projects.find(p => p.projectId === workspace?.projectId);
+    return [project?.customName || project?.displayName, workspace?.title || workspace?.displayName].filter(Boolean).join(" · ");
+  };
   const isCollapsed = (projectId: string) => collapsed.has(projectId) !== !expandProjectsByDefault;
   const toggle = (id: string) => setSelected(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
   const toggleAll = (ids: string[], on: boolean) => setSelected(prev => { const next = new Set(prev); for (const id of ids) { if (on) next.add(id); else next.delete(id); } return next; });
@@ -336,9 +456,9 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
       <ScrollView style={styles.scroll} contentContainerStyle={[styles.content, { paddingBottom: hasSelection ? 96 : 32 }]} keyboardShouldPersistTaps="handled">
         <View style={styles.headerRow}>
           <View style={{ flex: 1, minWidth: 0 }}>
-            <Text style={styles.title}>清理</Text>
+            {/* 页面名由宿主顶栏显示，这里不再重复大标题，只留统计。 */}
             <Text style={styles.stats}>
-              {loaded ? `${agents.length} 个 Agent · ${cleanableCount} 个已归档或已关闭` : error ? "读取失败" : "正在读取…"}
+              {loaded ? `${agents.length} 个 Agent · ${new Set(agents.map(a => a.workspaceId).filter(Boolean)).size} 个 Workspace · ${counts.cleanable} 个可清理` : error ? "读取失败" : "正在读取…"}
             </Text>
           </View>
           <Pressable accessibilityRole="button" accessibilityLabel="刷新" disabled={loading} hitSlop={6} onPress={() => void refresh()}
@@ -348,7 +468,7 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
         </View>
 
         <View style={styles.toolbar}>
-          <Segment value={activeFilter} onChange={setFilter} counts={{ cleanable: cleanableCount, all: agents.length }} styles={styles} colors={colors} />
+          <Segment value={activeFilter} onChange={setFilter} counts={counts} styles={styles} colors={colors} />
           <View style={styles.search}>
             <Icon name="Search" size={14} color={colors.foregroundMuted} />
             <TextInput value={query} onChangeText={setQuery} placeholder="搜索标题、Workspace 或 Project" placeholderTextColor={colors.foregroundMuted}
@@ -366,14 +486,19 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
           <View style={styles.empty}>
             <Icon name="BrushCleaning" size={20} color={colors.foregroundMuted} />
             <Text style={styles.emptyText}>
-              {query ? `没有匹配「${query.trim()}」的 Agent` : activeFilter === "cleanable" ? "没有已归档或已关闭的 Agent，暂时不用清理" : "没有 Agent"}
+              {query ? `没有匹配「${query.trim()}」的 Agent`
+                : activeFilter === "cleanable" ? "没有已归档或已关闭的 Agent，暂时不用清理"
+                : activeFilter === "attention" ? "没有等你处理的 Agent"
+                : activeFilter === "running" ? "没有正在运行的 Agent" : "没有 Agent"}
             </Text>
             <View>
               {query ? <ActionButton label="清空搜索" size="small" theme={cleanupTheme} onPress={() => setQuery("")} />
-                : activeFilter === "cleanable" && agents.length ? <ActionButton label={`查看全部 ${agents.length} 个`} size="small" theme={cleanupTheme} onPress={() => setFilter("all")} /> : null}
+                : activeFilter !== "all" && agents.length ? <ActionButton label={`查看全部 ${agents.length} 个`} size="small" theme={cleanupTheme} onPress={() => setFilter("all")} /> : null}
             </View>
           </View>
         ) : null}
+
+        {waiting.length ? <AttentionPanel agents={waiting} labelOf={placeOf} navigation={navigation} styles={styles} colors={colors} /> : null}
 
         <View style={styles.list}>
           {groups.map(group => (
@@ -383,6 +508,7 @@ export function MainSurface({ theme, layout }: PluginScreenProps) {
               styles={styles} colors={colors}>
               {group.workspaceIds.map((id, index) => (
                 <WorkspaceGroup key={id} first={index === 0} workspaceId={id.startsWith("agent:") ? undefined : id} workspace={workspaces.find(w => w.workspaceId === id)}
+                  live={liveWorkspaces.get(id)} navigation={navigation}
                   projectRoot={group.project?.rootPath} agents={group.agents.filter(a => (a.workspaceId ?? `agent:${a.id}`) === id)}
                   selected={selected} onToggle={toggle} onToggleAll={toggleAll} onDone={() => void refresh()} styles={styles} colors={colors} theme={cleanupTheme} />
               ))}
