@@ -7,6 +7,11 @@ const SYNC_DEBOUNCE_MS = 400;
 // 0.8 的 header 按钮按 workspace 注册，所以要跟随 workspace 列表增删。
 // 订阅事件只当作「有变化」的信号：统一重新拉取列表再做差量，
 // 不耦合事件负载结构，也避免每个事件都触发一次注册。
+//
+// 变化信号必须来自自己持有的 `list({ subscribe: {} })` 观察：`workspaces.subscribe()`
+// 只是本地监听器，没有观察时 daemon 不会推送任何更新，插件加载后新建的 workspace
+// 就永远拿不到按钮（表现为最新的会话右上角没有垃圾桶）。观察在重连后会再推一次快照，
+// 断线期间漏掉的增删也由那次快照补上。
 export function contributeHeaderButtons(client: PluginClientContext) {
   const buttons = new Map<string, PluginButtonRegistration>();
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -66,13 +71,24 @@ export function contributeHeaderButtons(client: PluginClientContext) {
     timer = setTimeout(() => { timer = null; void run(); }, SYNC_DEBOUNCE_MS);
   }
 
-  const unsubscribe = client.paseo.workspaces.subscribe(schedule);
+  let stopObserving: (() => void) | null = null;
+  let release: (() => Promise<void>) | null = null;
+  void client.paseo.workspaces
+    .list({ subscribe: {}, page: { limit: 1 } })
+    .then(({ subscription }) => {
+      if (stopped) { void subscription.release(); return; }
+      release = () => subscription.release();
+      stopObserving = subscription.subscribe({ snapshot: schedule, update: schedule, error: schedule });
+    })
+    // 建不起观察时退化为只在加载时同步一次；下次插件或 app 重载会重试。
+    .catch(() => {});
   void run();
 
   return () => {
     stopped = true;
     if (timer) { clearTimeout(timer); timer = null; }
-    unsubscribe();
+    stopObserving?.();
+    void release?.();
     for (const registration of buttons.values()) registration.remove();
     buttons.clear();
   };
