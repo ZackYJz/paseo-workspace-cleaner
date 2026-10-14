@@ -88,18 +88,50 @@ export function useCleanupStyles({ colors, compact }: CleanupTheme) {
       buttonDangerSmall: { paddingHorizontal: 12 },
       buttonTextSmall: { fontSize: 12 },
       buttonText: { color: colors.foreground, fontSize: 13, fontWeight: "500" as const },
+      // 最终确认用实心红：整个浮层里只有它会真的删东西，视觉上必须独一份。
+      // 文字取 surface0：深色主题下是深字压浅红，浅色主题下是白字压深红，都不写死颜色。
+      buttonDestructive: { backgroundColor: colors.statusDanger, borderColor: colors.statusDanger, paddingHorizontal: 14 },
+      buttonTextDestructive: { color: colors.surface0, fontWeight: "600" as const },
+
+      // header 清理浮层
+      sheet: { gap: compact ? 14 : 16 },
+      sheetHead: { gap: 3 },
+      eyebrowRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
+      eyebrow: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 16, fontWeight: "600" as const },
+      sectionLabel: { color: colors.foregroundMuted, fontSize: 12, lineHeight: 16, fontWeight: "600" as const },
+      options: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, overflow: "hidden" as const },
+      option: { flexDirection: "row" as const, alignItems: "center" as const, gap: 10, paddingHorizontal: 12, paddingVertical: 10 },
+      optionDivider: { borderTopWidth: 1, borderTopColor: colors.border },
+      optionSelected: { backgroundColor: colors.surface1 },
+      radio: { width: 16, height: 16, borderRadius: 8, borderWidth: 1.5, borderColor: colors.foregroundMuted, alignItems: "center" as const, justifyContent: "center" as const },
+      radioOn: { borderColor: colors.statusDanger },
+      radioDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.statusDanger },
+      optionText: { flex: 1, gap: 1 },
+      optionCount: { color: colors.foregroundMuted, fontSize: 13, fontVariant: ["tabular-nums" as const] },
+      agentList: { maxHeight: 220 },
+      agentItem: { flexDirection: "row" as const, alignItems: "flex-start" as const, gap: 8, paddingVertical: 6 },
+      agentItemKept: { opacity: 0.45 },
+      bullet: { width: 6, height: 6, borderRadius: 3, marginTop: 8, backgroundColor: colors.statusDanger },
+      bulletKept: { backgroundColor: colors.foregroundMuted },
+      keptTag: { color: colors.foregroundMuted, fontSize: 11, lineHeight: 20 },
+      warningText: { color: colors.statusWarning, fontSize: 12, lineHeight: 18 },
+      footer: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 12, gap: 10 },
+      footerActions: { flexDirection: "row" as const, justifyContent: "flex-end" as const, alignItems: "center" as const, gap: 8 },
     }),
     [colors, compact],
   );
 }
 
-export function ActionButton({ label, icon, theme, onPress, disabled = false, danger = false, size = "normal" }: {
+export function ActionButton({ label, icon, theme, onPress, disabled = false, danger = false, destructive = false, size = "normal" }: {
   label: string;
   icon?: string;
   theme: CleanupTheme;
   onPress: () => void;
   disabled?: boolean;
+  /** 红色描边：会进入删除流程的入口。 */
   danger?: boolean;
+  /** 实心红：真正执行删除的最终确认，一个界面只放一个。 */
+  destructive?: boolean;
   size?: "normal" | "small";
 }) {
   const styles = useCleanupStyles(theme);
@@ -118,13 +150,15 @@ export function ActionButton({ label, icon, theme, onPress, disabled = false, da
         size === "small" && styles.buttonSmall,
         danger && styles.buttonDanger,
         danger && size === "small" && styles.buttonDangerSmall,
+        destructive && styles.buttonDestructive,
         focused && { borderColor: theme.colors.accent },
-        pressed && { backgroundColor: theme.colors.surface2, transform: [{ scale: 0.98 }] },
+        pressed && !destructive && { backgroundColor: theme.colors.surface2 },
+        pressed && { transform: [{ scale: 0.98 }] },
         disabled && { opacity: 0.45 },
       ]}
     >
-      {icon ? <Icon name={icon} size={size === "small" ? 13 : 15} color={theme.colors.foregroundMuted} /> : null}
-      <Text style={[styles.buttonText, size === "small" && styles.buttonTextSmall, danger && { color: theme.colors.statusDanger }]}>{label}</Text>
+      {icon ? <Icon name={icon} size={size === "small" ? 13 : 15} color={destructive ? theme.colors.surface0 : theme.colors.foregroundMuted} /> : null}
+      <Text style={[styles.buttonText, size === "small" && styles.buttonTextSmall, danger && { color: theme.colors.statusDanger }, destructive && styles.buttonTextDestructive]}>{label}</Text>
     </Pressable>
   );
 }

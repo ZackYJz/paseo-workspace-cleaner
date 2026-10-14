@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Switch, Text, View } from "react-native";
+import { Pressable, Switch, Text, View } from "react-native";
 import type { PluginButtonContentProps } from "@getpaseo/plugin/client";
 import { usePaseo, useRpc, useWorkspace } from "@getpaseo/plugin/client";
-import { Icon, Modal, useToast } from "@getpaseo/plugin/client/react-native";
+import { Icon, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/react-native";
 import { cleanupAgentRpc, cleanupWorkspaceRpc, isFinishedAgent } from "../shared/cleanup";
 import { useCleanupDefaults } from "./defaults";
 import { ActionButton, agentStatusText, listAllAgents, useCleanupStyles } from "./cleanup-ui";
@@ -73,67 +73,11 @@ export function PiSessionSwitch({ value, onChange, theme, disabled = false }: {
   return (
     <View style={styles.spread}>
       <View style={styles.grow}>
-        <Text style={styles.text}>同时移除 Pi session</Text>
-        <Text style={styles.muted}>会删除 ~/.pi/agent/sessions 下的对应记录。</Text>
+        <Text style={styles.text}>同时移除 Pi 会话文件</Text>
+        <Text style={styles.muted}>移到系统废纸篓，可以找回。仍被其他 Agent 使用的会保留。</Text>
       </View>
-      <Switch accessibilityLabel="同时移除 Pi session" value={value} disabled={disabled} onValueChange={onChange} />
+      <Switch accessibilityLabel="同时移除 Pi 会话文件" value={value} disabled={disabled} onValueChange={onChange} />
     </View>
-  );
-}
-
-// 清理范围卡片：把「将永久删除什么」提为浮层与弹窗里唯一的视觉锚点。
-export function CleanupScopeCard({ scope, note, loading, loadError, theme, children }: {
-  scope: string;
-  note: string;
-  loading: boolean;
-  loadError: string | null;
-  theme: CleanupTheme;
-  children?: React.ReactNode;
-}) {
-  const styles = useCleanupStyles(theme);
-  return (
-    <View style={styles.scopeCard} accessibilityLabel="清理范围">
-      <View style={styles.scopeLabelRow}>
-        <Icon name="Trash2" size={13} color={theme.colors.statusDanger} />
-        <Text style={styles.scopeLabel}>将永久删除</Text>
-      </View>
-      {loadError
-        ? <Text accessibilityRole="alert" style={styles.danger}>{loadError}</Text>
-        : loading
-          ? <Text style={styles.muted}>正在读取清理范围…</Text>
-          : <Text style={styles.text}>{scope}</Text>}
-      {children}
-      <Text style={styles.muted}>{note}</Text>
-    </View>
-  );
-}
-
-export function WorkspaceScopeList({ agents, loading, loadError, theme }: {
-  agents: ListedAgent[] | null;
-  loading: boolean;
-  loadError: string | null;
-  theme: CleanupTheme;
-}) {
-  const styles = useCleanupStyles(theme);
-  return (
-    <CleanupScopeCard
-      theme={theme}
-      loading={loading}
-      loadError={loadError}
-      scope={agents?.length ? `${agents.length} 个 Agent 与全部时间线` : "此 Workspace 下没有 Agent"}
-      note="「仅已关闭」只删除上面标注为已归档或已关闭的行。保留项目文件与 Workspace 归档记录。"
-    >
-      {agents?.length ? (
-        <View style={{ gap: 6 }}>
-          {agents.map(agent => (
-            <View key={agent.id} style={styles.scopeRow}>
-              <Text style={styles.text} numberOfLines={1}>{agent.title ?? "未命名 Agent"}</Text>
-              <Text style={styles.metaLine}>{agentStatusText(agent)} · {agent.provider} · {agent.id.slice(0, 8)}</Text>
-            </View>
-          ))}
-        </View>
-      ) : null}
-    </CleanupScopeCard>
   );
 }
 
@@ -190,7 +134,7 @@ export function ConfirmCleanup({
         {error ? <Text accessibilityRole="alert" style={styles.danger}>{error}</Text> : null}
         <View style={styles.meta}>
           <ActionButton label="取消" theme={theme} disabled={busy} onPress={() => onOpenChange(false)} />
-          <ActionButton label={busy ? "正在删除…" : confirmLabel} theme={theme} danger disabled={busy || confirmDisabled} onPress={onConfirm} />
+          <ActionButton label={busy ? "正在删除…" : confirmLabel} theme={theme} destructive disabled={busy || confirmDisabled} onPress={onConfirm} />
         </View>
       </Modal.Content>
     </Modal>
@@ -202,6 +146,13 @@ export function ConfirmCleanup({
 export function WorkspaceCleanupSheet(props: PluginButtonContentProps) {
   if (props.context !== "workspace") return null;
   return <WorkspaceCleanupSheetBody theme={props.theme} layout={props.layout} workspaceId={props.workspaceId} close={props.close} />;
+}
+
+type Scope = "all" | "finished";
+
+/** /Users/name/x 和 /home/name/x 显示成 ~/x；客户端拿不到 HOME，只认这两种常见前缀。 */
+function shortPath(directory: string): string {
+  return directory.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~");
 }
 
 function WorkspaceCleanupSheetBody({ theme, layout, workspaceId, close }: {
@@ -218,9 +169,9 @@ function WorkspaceCleanupSheetBody({ theme, layout, workspaceId, close }: {
   const [deletePiSessions, setDeletePiSessions] = useState(deletePiSessionsByDefault);
   const [agents, setAgents] = useState<ListedAgent[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [scope, setScope] = useState<Scope>("all");
   const { busy, error, run } = useWorkspaceCleanup();
   const loading = agents === null && !loadError;
-  const finishedCount = agents?.filter(agent => isFinishedAgent(agent)).length ?? 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -232,33 +183,105 @@ function WorkspaceCleanupSheetBody({ theme, layout, workspaceId, close }: {
     return () => { cancelled = true; };
   }, [paseo, workspaceId]);
 
-  async function confirm(onlyFinished: boolean) {
-    const ok = await run({ workspaceId, deletePiSessions, onlyFinished });
+  const all = agents ?? [];
+  const finished = all.filter(agent => isFinishedAgent(agent));
+  // 没有已结束的 Agent 时「仅已关闭」没有意义，退回「全部」，免得确认按钮停在 0。
+  const effectiveScope: Scope = scope === "finished" && finished.length === 0 ? "all" : scope;
+  const targets = effectiveScope === "finished" ? finished : all;
+  const willDelete = (agent: ListedAgent) => effectiveScope === "all" || isFinishedAgent(agent);
+  const running = targets.filter(agent => agent.status === "running" || agent.status === "initializing").length;
+  const hasPi = targets.some(agent => agent.provider === "pi");
+
+  async function confirm() {
+    const ok = await run({ workspaceId, deletePiSessions: hasPi && deletePiSessions, onlyFinished: effectiveScope === "finished" });
     if (ok) close();
   }
 
+  const option = (value: Scope, label: string, hint: string, count: number, first: boolean) => {
+    const selected = effectiveScope === value;
+    const disabled = busy || loading || count === 0;
+    return (
+      <Pressable
+        accessibilityRole="radio"
+        accessibilityLabel={`${label}，${count} 个`}
+        accessibilityState={{ checked: selected, disabled }}
+        // react-native-web 不会把 accessibilityState.checked 映射成 aria-checked，网页端读屏要靠这个。
+        aria-checked={selected}
+        disabled={disabled}
+        onPress={() => setScope(value)}
+        style={({ pressed }) => [styles.option, !first && styles.optionDivider, selected && styles.optionSelected, pressed && { opacity: 0.7 }, disabled && !selected && { opacity: 0.45 }]}
+      >
+        <View style={[styles.radio, selected && styles.radioOn]}>{selected ? <View style={styles.radioDot} /> : null}</View>
+        <View style={styles.optionText}>
+          <Text style={styles.text}>{label}</Text>
+          <Text style={styles.metaLine}>{hint}</Text>
+        </View>
+        <Text style={styles.optionCount}>{loading ? "…" : count}</Text>
+      </Pressable>
+    );
+  };
+
+  let scopeBody: React.ReactNode;
+  if (loadError) scopeBody = <Text accessibilityRole="alert" style={styles.danger}>{loadError}</Text>;
+  else if (loading) scopeBody = <Text style={styles.muted}>正在读取清理范围…</Text>;
+  else if (all.length === 0) scopeBody = <Text style={styles.muted}>此 Workspace 下没有 Agent。</Text>;
+  else {
+    scopeBody = (
+      <>
+        <View style={styles.options} accessibilityRole="radiogroup" accessibilityLabel="删除范围">
+          {option("all", "全部 Agent", "包括空闲和运行中的", all.length, true)}
+          {option("finished", "仅已关闭或已归档", "空闲和运行中的保留", finished.length, false)}
+        </View>
+        <ScrollView style={styles.agentList} accessibilityLabel="Agent 列表">
+          {all.map(agent => {
+            const deleted = willDelete(agent);
+            return (
+              <View key={agent.id} style={[styles.agentItem, !deleted && styles.agentItemKept]}>
+                <View style={[styles.bullet, !deleted && styles.bulletKept]} />
+                <View style={styles.grow}>
+                  <Text style={styles.text} numberOfLines={2}>{agent.title ?? "未命名 Agent"}</Text>
+                  <Text style={styles.metaLine}>{agentStatusText(agent)} · {agent.provider}</Text>
+                </View>
+                {deleted ? null : <Text style={styles.keptTag}>保留</Text>}
+              </View>
+            );
+          })}
+        </ScrollView>
+        {running > 0 ? <Text style={styles.warningText}>{`其中 ${running} 个正在运行，删除时会先中断。`}</Text> : null}
+      </>
+    );
+  }
+
   return (
-    <View style={styles.dialogBody}>
-      <View style={styles.dialogHeader}>
-        <Text style={styles.identity}>{workspace?.name ?? workspaceId}</Text>
-        {workspace?.directory ? <Text style={styles.metaLine}>{workspace.directory}</Text> : null}
-        <Text style={styles.idText}>{workspaceId}</Text>
+    <View style={styles.sheet}>
+      <View style={styles.sheetHead}>
+        <View style={styles.eyebrowRow}>
+          <Icon name="Trash2" size={12} color={theme.colors.statusDanger} />
+          <Text style={styles.eyebrow}>清理 Workspace</Text>
+        </View>
+        <Text style={styles.identity} numberOfLines={2}>{workspace?.name ?? "Workspace"}</Text>
+        {workspace?.directory ? <Text style={styles.metaLine} numberOfLines={1}>{shortPath(workspace.directory)}</Text> : null}
       </View>
-      <View style={styles.sheetActions}>
-        <ActionButton label="取消" size="small" theme={cleanupTheme} onPress={close} />
-        <ActionButton
-          label={finishedCount > 0 ? `仅已关闭（${finishedCount}）` : "仅已关闭"}
-          size="small"
-          theme={cleanupTheme}
-          danger
-          disabled={busy || loading || finishedCount === 0}
-          onPress={() => { void confirm(true); }}
-        />
-        <ActionButton label="清理全部" size="small" theme={cleanupTheme} danger disabled={busy || loading} onPress={() => { void confirm(false); }} />
+
+      {scopeBody}
+
+      {hasPi ? <PiSessionSwitch value={deletePiSessions} onChange={setDeletePiSessions} disabled={busy} theme={cleanupTheme} /> : null}
+
+      <View style={styles.footer}>
+        {error ? <Text accessibilityRole="alert" style={styles.danger}>{error}</Text> : null}
+        <Text style={styles.muted}>Agent 记录和时间线会永久删除，无法撤销。项目文件和 Workspace 记录保留。</Text>
+        <View style={styles.footerActions}>
+          <ActionButton label="取消" size="small" theme={cleanupTheme} disabled={busy} onPress={close} />
+          <ActionButton
+            label={busy ? "正在删除…" : `删除 ${targets.length} 个 Agent`}
+            size="small"
+            destructive
+            theme={cleanupTheme}
+            disabled={busy || loading || targets.length === 0}
+            onPress={() => { void confirm(); }}
+          />
+        </View>
       </View>
-      <WorkspaceScopeList agents={agents} loading={loading} loadError={loadError} theme={cleanupTheme} />
-      <PiSessionSwitch value={deletePiSessions} onChange={setDeletePiSessions} theme={cleanupTheme} />
-      {error ? <Text accessibilityRole="alert" style={styles.danger}>{error}</Text> : null}
     </View>
   );
 }

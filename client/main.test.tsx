@@ -221,26 +221,31 @@ test("Pi session 开关的初始值来自插件设置，而不是写死的 true"
   expect(renderer.root.findByType("Switch" as never).props.value).toBe(false);
 });
 
-test("header 浮层列出清理范围，确认后调用 RPC 并关闭浮层", async () => {
+const radio = (label: string) => renderer.root.findAllByType("Button" as never).find(node => node.props.accessibilityRole === "radio" && String(node.props.accessibilityLabel).startsWith(label))!;
+
+test("header 浮层先列范围再给按钮，确认后调用 RPC 并关闭浮层", async () => {
   const close = vi.fn();
   await mountSheet(close);
   await act(async () => {});
   expect(visible()).toContain("真实 Workspace 名称");
-  expect(visible()).toContain("1 个 Agent 与全部时间线");
   expect(visible()).toContain("这是 Agent 标题");
-  await press("清理全部");
+  // 机器 ID 不再出现在浮层里
+  expect(visible()).not.toContain("workspace-1");
+  expect(radio("全部 Agent").props.accessibilityState.checked).toBe(true);
+  await press("删除 1 个 Agent");
   expect(mocks.cleanup).toHaveBeenCalledWith({ workspaceId: "workspace-1", deletePiSessions: true, onlyFinished: false, confirmation: "DELETE" });
   expect(close).toHaveBeenCalled();
 });
 
-test("没有已归档或已关闭 Agent 时，仅清理按钮禁用", async () => {
+test("没有已归档或已关闭 Agent 时，「仅已关闭或已归档」不可选", async () => {
   const close = vi.fn();
   await mountSheet(close);
   await act(async () => {});
-  expect(button("仅已关闭").props.disabled).toBe(true);
+  expect(radio("仅已关闭或已归档").props.disabled).toBe(true);
+  expect(radio("仅已关闭或已归档").props.accessibilityLabel).toBe("仅已关闭或已归档，0 个");
 });
 
-test("仅清理按钮只提交已结束范围，不碰 idle 与 running", async () => {
+test("选「仅已关闭或已归档」只提交已结束范围，按钮数量跟着变，其余行标为保留", async () => {
   mocks.list.mockResolvedValue({ entries: [
     { agent: { ...agent, id: "archived-1", title: "已归档的一个", status: "closed", archivedAt: "2026-09-01" } },
     { agent: { ...agent, id: "closed-1", title: "已关闭的一个", status: "closed", archivedAt: null } },
@@ -249,10 +254,44 @@ test("仅清理按钮只提交已结束范围，不碰 idle 与 running", async 
   const close = vi.fn();
   await mountSheet(close);
   await act(async () => {});
-  expect(visible()).toContain("仅已关闭（2）");
-  await press("仅已关闭（2）");
+  const keptTags = () => renderer.root.findAllByType("Text" as never).filter(node => node.props.children === "保留").length;
+  expect(visible()).toContain("删除 3 个 Agent");
+  expect(keptTags()).toBe(0);
+  await act(async () => radio("仅已关闭或已归档").props.onPress());
+  expect(visible()).toContain("删除 2 个 Agent");
+  expect(keptTags()).toBe(1);
+  await press("删除 2 个 Agent");
   expect(mocks.cleanup).toHaveBeenCalledWith({ workspaceId: "workspace-1", deletePiSessions: true, onlyFinished: true, confirmation: "DELETE" });
   expect(close).toHaveBeenCalled();
+});
+
+test("范围里没有 Pi Agent 时不显示 Pi 会话开关，也不提交删除 Pi 会话", async () => {
+  withAgents({ ...agent, provider: "codex" });
+  const close = vi.fn();
+  await mountSheet(close);
+  await act(async () => {});
+  expect(renderer.root.findAllByType("Switch" as never)).toHaveLength(0);
+  await press("删除 1 个 Agent");
+  expect(mocks.cleanup).toHaveBeenCalledWith(expect.objectContaining({ deletePiSessions: false }));
+});
+
+test("Pi 会话开关关掉后按关闭提交", async () => {
+  const close = vi.fn();
+  await mountSheet(close);
+  await act(async () => {});
+  await act(async () => renderer.root.findByType("Switch" as never).props.onValueChange(false));
+  await press("删除 1 个 Agent");
+  expect(mocks.cleanup).toHaveBeenCalledWith(expect.objectContaining({ deletePiSessions: false }));
+});
+
+test("删除失败时错误留在浮层里，不关闭", async () => {
+  mocks.cleanup.mockRejectedValueOnce(new Error("拒绝删除测试对象"));
+  const close = vi.fn();
+  await mountSheet(close);
+  await act(async () => {});
+  await press("删除 1 个 Agent");
+  expect(visible()).toContain("拒绝删除测试对象");
+  expect(close).not.toHaveBeenCalled();
 });
 
 test("header 浮层读取中显示待定文案，取消只关闭浮层", async () => {
