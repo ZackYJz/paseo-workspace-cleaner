@@ -21,7 +21,13 @@ Paseo 插件，侧栏和页面里叫「清理」。在线清理已归档的 Work
 - 同一 Pi session 仍被其他 Agent 引用时自动保留
 - Pi session 优先进系统废纸篓，废纸篓命令不可用时改名隔离，不直接永久删除
 
-其他入口都是浮层，不开新标签页：Workspace header 的垃圾桶按钮、Command Center 两项、composer 里的 `/clean`。header 浮层另提供「仅已关闭（N）」，只删除已归档或已关闭的 Agent，不碰 idle 与 running。范围卡先列出将被删除的每个 Agent，确认弹窗是第二道闸。
+其他入口都是浮层，不开新标签页：Workspace header 的垃圾桶按钮、Command Center 两项、composer 里的 `/clean`。
+
+header 浮层从上到下是：Workspace 名与目录，「删除范围」二选一（全部 Agent / 仅已关闭或已归档，各带数量），将受影响的 Agent 列表，Pi 会话开关，最后才是按钮。选「仅已关闭或已归档」时，空闲和运行中的行变淡并标「保留」。只有一个执行按钮，文字直接写「删除 N 个 Agent」，数量跟着范围变；范围里有运行中的 Agent 时会提示删除前先中断。范围里没有 Pi Agent 时不显示 Pi 会话开关，也不提交删除 Pi 会话。
+
+所有清理在插件里按到达顺序排队，一次只跑一个。连续删几个 Workspace 时，后一个会等前一个跑完再开始，不会报「已有清理任务」。排队最多等 40 秒（客户端插件 RPC 的超时是 60 秒），等不到就放弃这次请求并提示稍后重试，这次什么都不删，保证提示和实际结果一致。批量删除时逐个调用官方删除命令，最后只读一次目录核对，删除后仍在的 Agent 单独报出。
+
+header 按钮按 workspace 逐个注册，靠插件自己持有的 `workspaces.list({ subscribe: {} })` 观察得知 workspace 增删。`workspaces.subscribe()` 只是本地监听器，没有这个观察时 daemon 不推送更新，插件加载后新建的 workspace 就没有按钮。观察在重连后会再推一次快照，断线期间的增删也会补上。
 
 已归档且下面没有 Agent 的 Workspace 不在清理页列出，因为 Paseo 自己也不再显示它们，见下文。
 
