@@ -10,6 +10,8 @@ Paseo 插件，在侧栏里叫「会话」。一个页面看全部会话，顺�
 
 所有删除都走 Paseo 官方命令，不停 daemon，不改写 Paseo 的存储文件。插件 id 是 `paseo-workspace-cleaner`。原来的 workspace-agent-count（Agent 总览）已并入本插件。
 
+![会话页，示例数据已打码](docs/screenshots/cleanup-page.png)
+
 ## 会话页
 
 从侧栏「会话」打开。

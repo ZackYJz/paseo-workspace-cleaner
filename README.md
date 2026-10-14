@@ -10,6 +10,8 @@ A Paseo plugin, shown in the sidebar as 「会话」 (Sessions). One page to see
 
 Every deletion goes through Paseo's official commands. The daemon is not stopped and Paseo's storage files are never rewritten. The plugin id is `paseo-workspace-cleaner`. The former workspace-agent-count plugin (agent overview) has been merged into this one.
 
+![Sessions page](docs/screenshots/cleanup-page.png)
+
 ## Sessions page
 
 Open it from the 「会话」 entry in the sidebar.
