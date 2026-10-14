@@ -1,70 +1,72 @@
-# 会话管理
+# Session Manager (paseo-workspace-cleaner)
 
-Paseo 插件，在侧栏里叫「会话」。一个页面看全部会话，顺手清理不要的。
+**English** | [简体中文](README.zh-CN.md)
 
-- 按项目和 Workspace 列出所有 Agent，实时显示哪些在等你处理、哪些在运行。
-- 勾选后批量删除 Agent 和时间线，对应的 Pi 会话文件移到废纸篓。
-- 可选：Workspace 归档满宽限期后自动清理。
+A Paseo plugin, shown in the sidebar as 「会话」 (Sessions). One page to see all your sessions, and to clean up the ones you no longer need. The plugin UI is currently in Chinese.
 
-所有删除都走 Paseo 官方命令，不停 daemon，不改写 Paseo 的存储文件。插件 id 是 `paseo-workspace-cleaner`。原来的 workspace-agent-count（Agent 总览）已并入本插件。
+- Lists every agent by project and workspace, and shows live which ones are waiting for you and which are running.
+- Select agents to delete them and their timelines in bulk; the matching Pi session files are moved to the Trash.
+- Optional: automatically clean up a workspace after it has been archived for a grace period.
 
-## 会话页
+Every deletion goes through Paseo's official commands. The daemon is not stopped and Paseo's storage files are never rewritten. The plugin id is `paseo-workspace-cleaner`. The former workspace-agent-count plugin (agent overview) has been merged into this one.
 
-从侧栏「会话」打开。
+## Sessions page
 
-**顶部**：Agent、Workspace、可清理的数量，刷新按钮，以及筛选和搜索。
+Open it from the 「会话」 entry in the sidebar.
 
-- 筛选：全部 / 需要处理 / 运行中 / 可清理，各带数量，默认「全部」。
-- 搜索：匹配会话标题、Workspace 名和项目名。
+**Top bar**: counts of agents, workspaces and cleanable items, a refresh button, and filter and search.
 
-**等你处理**：在「全部」视图、没有搜索时显示在最上面，列出等待授权、出错、需要处理的会话，等得最久的在前，点一下直接打开。
+- Filters: All / Needs attention / Running / Cleanable, each with a count. The default is All.
+- Search: matches session titles, workspace names and project names.
 
-**列表**：按项目分组，项目可以折叠。
+**Waiting for you**: in the All view with no search active, this section sits at the top. It lists sessions that are waiting for permission, failed or need attention, longest-waiting first. One click opens a session.
 
-- Workspace 行：名称（点击打开）、状态（运行中、需要输入、失败等，取 Paseo 自己的汇总）、未提交改动（`+1.5M −38k`）、Agent 数、最近活动。
-- Agent 行：状态点、标题、状态、provider、最近活动。实心点表示状态需要留意（红：等待授权、出错；强调色：运行中；绿：已完成），空心点表示空闲、已关闭或已归档。
-- 点 Agent 行打开会话，点左侧勾选框才是选中。Workspace 行的勾选框一次选中它下面的全部 Agent。选中后底部出现「删除 N 个」。
-- 活跃 Workspace 行右侧的归档图标是「归档并清理」：先归档，再删除其下全部 Agent。
+**List**: grouped by project; projects can be collapsed.
 
-页面会自动刷新：会话开始或结束、等待授权、归档、标题或改动变化时重新读取。Agent 输出内容时不触发刷新。
+- Workspace row: name (click to open), status (running, needs input, failed and so on, taken from Paseo's own summary), uncommitted changes (`+1.5M −38k`), agent count and last activity.
+- Agent row: status dot, title, status, provider and last activity. A filled dot means the state needs a look (red: waiting for permission or failed; accent color: running; green: finished). A hollow dot means idle, closed or archived.
+- Click an agent row to open the session; only the checkbox on the left selects it. The checkbox on a workspace row selects all agents under it. Once something is selected, a "Delete N" button appears at the bottom.
+- The archive icon on the right of an active workspace row is "Archive and clean up": it archives the workspace first, then deletes all agents under it.
 
-## 其他入口
+The page refreshes itself when a session starts or ends, waits for permission, is archived, or when a title or change count changes. It does not refresh while an agent is streaming output.
 
-都是浮层，不打开新页面。
+## Other entry points
 
-- Workspace 顶栏的垃圾桶按钮。
-- Command Center（⌘K）：「清理当前 Workspace」「删除当前 Agent」。
-- 输入框里的 `/clean`。
+All of them are popovers; none opens a new page.
 
-垃圾桶浮层从上到下是：Workspace 名和目录，删除范围（全部 Agent / 仅已关闭或已归档），将受影响的 Agent，Pi 会话开关，最后是按钮。按钮直接写「删除 N 个 Agent」，数量跟着范围变；选「仅已关闭或已归档」时，会保留的行变淡并标「保留」。
+- The trash button in the workspace header.
+- Command Center (⌘K): "Clean up current workspace" and "Delete current agent".
+- `/clean` in the prompt box.
 
-## 删除时会发生什么
+The trash popover shows, top to bottom: the workspace name and directory, the deletion scope (all agents / only closed or archived), the affected agents, the Pi session switch, and the button. The button reads "Delete N agents" and the number follows the scope. With "only closed or archived", the rows that will be kept are dimmed and marked "Keep".
 
-- Agent 记录和时间线永久删除，无法撤销。项目文件、Git worktree、其他 provider 的原生会话不动。
-- Pi 会话文件：开关打开时移到系统废纸篓，废纸篓不可用时改名隔离，不直接删除。仍被其他 Agent 使用的会话文件会保留。范围里没有 Pi Agent 时不显示这个开关。
-- 运行中的 Agent 会先被中断再删除，确认前会提示。
-- 清理按顺序排队，一次只执行一个。连续删除几个 Workspace 时，后一个会等前一个完成。最多等 40 秒，等不到就放弃这次请求、什么都不删，并提示稍后重试。
+## What happens on delete
 
-## 自动清理
+- Agent records and timelines are deleted permanently and cannot be undone. Project files, Git worktrees and native sessions of other providers are untouched.
+- Pi session files: with the switch on, they are moved to the system Trash; if the Trash is unavailable they are renamed and set aside, never deleted outright. A session file still used by another agent is kept. If no Pi agent is in scope, the switch is not shown.
+- Running agents are interrupted first and then deleted, with a warning before you confirm.
+- Cleanups are queued and run one at a time. When you delete several workspaces in a row, each waits for the previous one. A request waits at most 40 seconds; if it cannot start by then, it is abandoned, nothing is deleted, and you are asked to retry later.
 
-在 Settings → Plugins → 清理设置里打开，默认关闭。宽限期可选 1、3、7、14、30 天，默认 7 天。
+## Auto cleanup
 
-- 条件：Workspace 已归档满宽限期，且其下 Agent 都已归档或已关闭、没有进行中的回合和待处理的授权，否则跳过。
-- 宽限期内仍可在 Paseo 里恢复 Workspace。删除前会再确认一次，期间被恢复的不会动。
-- 是否同时移除 Pi 会话文件，跟随设置里的默认值。
-- 每小时最多运行一轮。插件刚加载时，要等到第一个事件（新建 Agent、回合结束、归档等）或打开会话页才开始计时；刚打开开关时会立即检查一轮。
-- 手动清理进行中时，这一轮让路，下次再试。
-- 设置页的「状态」显示当前已到期的范围和上次自动清理的结果，每一轮的记录也在 `paseo plugin logs paseo-workspace-cleaner` 里。
+Turn it on under Settings → Plugins → 清理设置 (Cleanup settings). It is off by default. The grace period can be 1, 3, 7, 14 or 30 days, 7 by default.
 
-## 要求与已知限制
+- Condition: the workspace has been archived for the full grace period, and all its agents are archived or closed with no turn in progress and no pending permission request. Otherwise it is skipped.
+- During the grace period you can still restore the workspace in Paseo. It is checked once more before deletion, and a workspace restored in the meantime is left alone.
+- Whether Pi session files are removed as well follows the default in settings.
+- It runs at most once an hour. After the plugin loads, the timer only starts at the first event (a new agent, a finished turn, an archive and so on) or when the Sessions page is opened; switching the setting on triggers an immediate check.
+- If a manual cleanup is in progress, that round yields and tries again later.
+- The "Status" section of the settings page shows what is currently due and the result of the last auto cleanup. Each round is also recorded in `paseo plugin logs paseo-workspace-cleaner`.
 
-- Paseo 0.11.0 或更高，2026-10 在 0.11.2 上验证。
-- 插件后端会在 daemon 所在机器上调用 `paseo agent delete` 和 `paseo agent inspect`。`paseo` 不在 daemon 的 `PATH` 里时，用环境变量 `PASEO_CLI_PATH` 指定绝对路径，设置页「状态」里能看到实际使用的路径。
-- 截至 0.11.2，Paseo 的 Agent 列表会漏掉一部分已归档 Agent。插件会只读地补读 `~/.paseo/agents`，并逐个用 `paseo agent inspect` 确认它们确实已归档、已关闭，确认不了就不继续。
-- 已归档且没有 Agent 的 Workspace 不会列出，因为 Paseo 自己也不再显示它们。Paseo 没有提供删除 Workspace 记录的接口，这些记录会留在 Paseo 的注册表里；以后在同一目录新建 Workspace 时，Paseo 会复用这条记录，旧标题也会回来。
-- 旧版「停机清理」已移除。它留下的任务目录和备份在 `~/.paseo/workspace-cleaner/`，插件不再读写，确认不需要后可以手动删除。
+## Requirements and known limitations
 
-## 开发
+- Paseo 0.11.0 or later; verified on 0.11.2 in October 2026.
+- The plugin backend calls `paseo agent delete` and `paseo agent inspect` on the machine running the daemon. If `paseo` is not on the daemon's `PATH`, set the environment variable `PASEO_CLI_PATH` to its absolute path. The path actually used is shown under "Status" on the settings page.
+- As of 0.11.2, Paseo's agent list misses some archived agents. The plugin reads `~/.paseo/agents` (read-only) to fill the gap, and confirms each one with `paseo agent inspect` as archived and closed; if it cannot confirm, it does not go on.
+- Archived workspaces with no agents are not listed, since Paseo itself no longer shows them. Paseo has no API for deleting workspace records, so these stay in Paseo's registry. When you later create a workspace in the same directory, Paseo reuses the record and the old title comes back.
+- The old shutdown cleanup has been removed. The task directories and backups it left are in `~/.paseo/workspace-cleaner/`; the plugin no longer reads or writes them, and you can delete them by hand once you are sure you do not need them.
+
+## Development
 
 ```bash
 npm install
@@ -74,19 +76,19 @@ paseo plugin install /absolute/path/to/paseo-workspace-cleaner
 paseo plugin ls
 ```
 
-`paseo plugin ls` 里应为 `running`，异常时看 `paseo plugin logs paseo-workspace-cleaner`。改完源码先测试和类型检查，再 `paseo plugin reload paseo-workspace-cleaner`，不需要重启 daemon。
+`paseo plugin ls` should show `running`; if not, check `paseo plugin logs paseo-workspace-cleaner`. After editing the source, run the tests and the type check, then `paseo plugin reload paseo-workspace-cleaner`. No daemon restart is needed.
 
 ```text
-index.client.tsx          App 入口：会话页、侧栏项、Command Center、设置页、顶栏按钮、/clean
-index.server.ts           daemon 入口：设置、RPC、自动清理的触发
-client/main.tsx           会话页
-client/live-refresh.ts    会话页的实时刷新（自己持有 agent / workspace 目录订阅）
-client/cleanup-dialog.tsx 顶栏垃圾桶浮层与各个确认弹窗
-client/header-buttons.ts  按 workspace 注册顶栏按钮
-server/cleanup.ts         删除 Agent、移除 Pi 会话文件、清理排队
-server/auto-cleanup.ts    到期判定与自动清理调度
-server/registry.ts        Paseo 注册表与 Agent 存储的只读访问
-shared/agent-state.ts     状态文案、颜色和排序
+index.client.tsx          App entry: Sessions page, sidebar item, Command Center, settings page, header button, /clean
+index.server.ts           Daemon entry: settings, RPC, auto-cleanup trigger
+client/main.tsx           Sessions page
+client/live-refresh.ts    Live refresh of the page (holds its own agent / workspace directory subscriptions)
+client/cleanup-dialog.tsx Header trash popover and the confirmation dialogs
+client/header-buttons.ts  Registers the header button per workspace
+server/cleanup.ts         Deletes agents, removes Pi session files, queues cleanups
+server/auto-cleanup.ts    Due-date check and auto-cleanup scheduling
+server/registry.ts        Read-only access to Paseo's registry and agent storage
+shared/agent-state.ts     Status text, colors and sorting
 ```
 
-单元测试使用临时目录和模拟的 `paseo` 命令，不会在真实数据上执行删除。
+Unit tests use temporary directories and a mocked `paseo` command; they never delete anything on real data.
